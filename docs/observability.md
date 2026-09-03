@@ -6,19 +6,19 @@ the flat `PRAXIS_MAX_CONCURRENT`) stops being a guess.
 
 ---
 
-## Assumptions to verify before merging
+## Assumptions -- resolved against the real codebase
 
-These were inferred, not read from the codebase. Fix them in
-`internal/metrics/labels.go` if they are wrong — every file here reads from that
-one place.
+These were inferred, not read from the codebase, when this doc was written.
+All five have since been checked against what actually exists and either
+confirmed or fixed; kept here as a record, not an open question list.
 
-| Assumption | Where |
+| Assumption | Resolution |
 |---|---|
-| Label keys `praxis.attempt_id`, `praxis.runbook`, `praxis.expires_at`, `praxis.spawned_at`, `praxis.weight` | `internal/metrics/labels.go` |
-| `expires_at` / `spawned_at` serialised as RFC3339 | `labels.go:ParseSession` |
-| Docker client is v25 (`types.ContainerListOptions`, `types.Container`) | `collect.go`, `cmd/hostmon` — breaks on v26+, see note at bottom |
-| Sandbox cgroup slice path `/sys/fs/cgroup/user.slice/user-1001.slice/user@1001.service/praxis-sbx.slice` | `PRAXIS_SLICE_PATH` env, hostmon |
-| Spawn API is `POST {base}/v1/sandboxes` with `{"attempt_id","runbook"}` | `bench/staircase.sh`, all paths are env-overridable |
+| Label keys `praxis.attempt_id`, `praxis.runbook`, `praxis.expires_at`, `praxis.spawned_at`, `praxis.weight` | **Wrong** -- real keys are hyphenated (`praxis.attempt-id`, `praxis.runbook-digest`, `praxis.expires-at`). `internal/metrics/labels.go` now references `internal/sandbox`'s own constants directly instead of a second hand-copied set, so this can't drift again. |
+| `expires_at` / `spawned_at` serialised as RFC3339 | Confirmed correct. |
+| Docker client is v25 (`types.ContainerListOptions`, `types.Container`) | Confirmed -- `go.mod` pins `v25.0.5+incompatible`. Breaks on v26+, unchanged risk, see note at bottom. |
+| Sandbox cgroup slice path `/sys/fs/cgroup/user.slice/user-1001.slice/user@1001.service/praxis-sbx.slice` | Now backed by a real unit: `deploy/praxis-sbx.slice`, referenced via `internal/sandbox.SandboxSlice` and set as every spawned container's `CgroupParent`. Previously just an env default with nothing creating the path. |
+| Spawn API is `POST {base}/v1/sandboxes` with `{"attempt_id","runbook"}` | **Wrong** -- real route is `POST {base}/instances` (port 8081, not 9100), auth is `X-Praxis-Token` not `Authorization: Bearer`, and `runbook` must be a fully inlined `Runbook` object, not a name (the orchestrator has no concept of a named runbook -- see `main.go`'s "knows nothing about tickets"). `bench/staircase.sh` now builds that object itself from the target ticket's own `scenario.yaml`. |
 
 ---
 

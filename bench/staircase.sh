@@ -2,8 +2,8 @@
 #
 # staircase.sh — measure the sandbox capacity of this box.
 #
-# Replaces the guessed PRAXIS_MAX_CONCURRENT with two measured numbers, which
-# are different limits:
+# Replaces the guessed PRAXIS_CAPACITY_WEIGHT with two measured numbers,
+# which are different limits:
 #
 #   1. steady-state weight  — how much can be held concurrently
 #   2. spawn rate           — how fast weight can be added
@@ -15,22 +15,40 @@
 # graph. The neighbour's health is one of them: this box also runs GitLab, and a
 # capacity number that degrades GitLab is not a capacity number.
 #
-# Run as praxis-sbx. Requires curl, jq, awk.
+# Run as praxis-sbx. Requires curl and awk (no jq, no yq -- scenario.yaml's
+# runtime: block is simple enough that a targeted awk/sed extraction covers
+# it without a new dependency).
 #
-#   ./bench/staircase.sh
-#   RUNBOOK=cpt-01 STEP_WEIGHT=4 MAX_WEIGHT=24 ./bench/staircase.sh
+#   IMAGE=praxis/ops-base@sha256:<id> ./bench/staircase.sh
+#   RUNBOOK=SKN-01 IMAGE=praxis/ops-base@sha256:<id> STEP_WEIGHT=1 MAX_WEIGHT=8 ./bench/staircase.sh
 #
+# The orchestrator has no concept of a named runbook -- POST /instances takes
+# a fully inlined Runbook object (internal/api/server.go's createReq), and
+# main.go's own header is explicit that the orchestrator "knows nothing about
+# tickets". So the ticket-awareness lives here, in this script, not as a
+# spawn-by-name convenience added to the orchestrator: RUNBOOK names a
+# directory under tickets/, this script reads that ticket's own
+# scenario.yaml runtime: block and builds the Runbook JSON itself.
+#
+# IMAGE is required, not read from scenario.yaml's substrate_image: that
+# field is REPLACE_AT_BAKE in all three shipped tickets (docs/session-02-plan.md,
+# "Still owed" -- the bake pipeline that fills it in doesn't exist yet).
+# Resolve a real digest-pinned reference the same way Phase D did for
+# praxis/ops-base (podman inspect --format '{{.Id}}', see
+# internal/sandbox/container.go's localImageRef) and pass it explicitly.
 set -euo pipefail
 
-# --- configuration ---------------------------------------------------------
-# Paths are ASSUMED. Override rather than edit.
-ORCH="${ORCH:-http://127.0.0.1:9100}"           # orchestrator API base
-SPAWN_PATH="${SPAWN_PATH:-/v1/sandboxes}"       # POST {attempt_id, runbook}
-DESTROY_PATH="${DESTROY_PATH:-/v1/sandboxes}"   # DELETE {base}/{attempt_id}
-HOSTMON="${HOSTMON:-http://127.0.0.1:9102}"
-TOKEN="${PRAXIS_API_TOKEN:-}"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-RUNBOOK="${RUNBOOK:-cpt-01}"        # benchmark the heaviest, not the average
+# --- configuration ---------------------------------------------------------
+# Paths and port match internal/api/server.go's actual routes -- override
+# rather than hand-edit if they ever move.
+ORCH="${ORCH:-http://127.0.0.1:8081}"
+TOKEN="${PRAXIS_API_TOKEN:-}"
+HOSTMON="${HOSTMON:-http://127.0.0.1:9102}"
+
+RUNBOOK="${RUNBOOK:-CPT-01}"        # benchmark the heaviest, not the average
+IMAGE="${IMAGE:-}"                  # required -- see header comment
 STEP_WEIGHT="${STEP_WEIGHT:-1}"     # weight added per step
 MAX_WEIGHT="${MAX_WEIGHT:-16}"      # hard ceiling; the run stops here regardless
 SOAK="${SOAK:-180}"                 # seconds held per step
@@ -46,7 +64,20 @@ STORAGE_MIN_PCT="${STORAGE_MIN_PCT:-20}"  # percent free on the container volume
 SPAWN_P95_MAX="${SPAWN_P95_MAX:-20}"      # seconds
 NEIGHBOUR_MS_MAX="${NEIGHBOUR_MS_MAX:-2000}"
 
-OUT="${OUT:-./bench/results/$(date -u +%Y%m%dT%H%M%SZ)}"
+if [[ -z "$TOKEN" ]]; then
+  echo "ERROR: PRAXIS_API_TOKEN is required -- there is no anonymous path against the real API" >&2
+  echo "  export PRAXIS_API_TOKEN=\$(sudo grep PRAXIS_ORCH_TOKEN ~praxis-sbx/.config/praxis/orchestrator.env | cut -d= -f2)" >&2
+  exit 1
+fi
+if [[ -z "$IMAGE" ]]; then
+  echo "ERROR: IMAGE is required -- see this script's header for why (no bake pipeline yet to resolve one)" >&2
+  exit 1
+fi
+
+SCENARIO="$REPO_ROOT/tickets/$RUNBOOK/scenario.yaml"
+[[ -r "$SCENARIO" ]] || { echo "ERROR: $SCENARIO not found -- RUNBOOK must match a tickets/<KEY> directory exactly (case-sensitive)" >&2; exit 1; }
+
+OUT="${OUT:-$REPO_ROOT/bench/results/$(date -u +%Y%m%dT%H%M%SZ)}"
 mkdir -p "$OUT"
 CSV="$OUT/samples.csv"
 SPAWNS="$OUT/spawns.csv"
@@ -61,7 +92,50 @@ LAST_GOOD=0
 
 log() { printf '%s  %s\n' "$(date -u +%H:%M:%S)" "$*" >&2; }
 
-auth_hdr() { [[ -n "$TOKEN" ]] && printf 'Authorization: Bearer %s' "$TOKEN" || printf 'X-Bench: 1'; }
+auth_hdr() { printf 'X-Praxis-Token: %s' "$TOKEN"; }
+
+# --- scenario.yaml -> Runbook JSON ------------------------------------------
+# Deliberately minimal, not a general YAML parser: the runtime: block in
+# every shipped ticket is flat key: value pairs, no nesting, which is exactly
+# what this covers and nothing more. If a ticket ever adds tmpfs/entrypoint
+# (real YAML lists/maps), this needs a real parser -- don't stretch it.
+runtime_block() {
+  awk '/^runtime:/{f=1;next} f && /^[^[:space:]]/{f=0} f{print}' "$SCENARIO"
+}
+
+yaml_val() { # $1=key $2=default -> trimmed, unquoted value, or the default
+  local v
+  v="$(printf '%s\n' "$RUNTIME_BLOCK" | grep -E "^[[:space:]]*${1}:" | head -1 \
+    | sed -E "s/^[[:space:]]*${1}:[[:space:]]*//; s/[[:space:]]*#.*//; s/^\"(.*)\"\$/\1/; s/[[:space:]]*\$//")"
+  printf '%s' "${v:-$2}"
+}
+
+# Defaults mirror internal/sandbox/runbook.go's DefaultRunbook() -- a field
+# scenario.yaml doesn't set should behave the same way here as it would
+# through LoadScenario, not silently diverge.
+RUNTIME_BLOCK="$(runtime_block)"
+RB_NETWORK="$(yaml_val network none)"
+RB_MEMORY="$(yaml_val memory 512m)"
+RB_CPUS="$(yaml_val cpus 1.0)"
+RB_PIDS="$(yaml_val pids_limit 256)"
+RB_TTL="$(yaml_val ttl_seconds 3600)"
+RB_SYSTEMD="$(yaml_val systemd false)"
+RB_WORKDIR="$(yaml_val workdir /home/candidate)"
+# None of the three shipped tickets set this yet -- every spawn is weight 1
+# until one does. Read it anyway, not hardcoded: the day a ticket's
+# scenario.yaml adds a real weight, this should pick it up without anyone
+# having to remember this script also needs editing.
+RB_WEIGHT="$(yaml_val weight 1)"
+
+log "ticket=$RUNBOOK image=$IMAGE network=$RB_NETWORK memory=$RB_MEMORY cpus=$RB_CPUS pids_limit=$RB_PIDS ttl_seconds=$RB_TTL systemd=$RB_SYSTEMD weight=$RB_WEIGHT"
+
+runbook_json() {
+  printf '{"image":%s,"network":%s,"memory":%s,"cpus":%s,"pids_limit":%s,"ttl_seconds":%s,"systemd":%s,"workdir":%s,"weight":%s}' \
+    "$(json_str "$IMAGE")" "$(json_str "$RB_NETWORK")" "$(json_str "$RB_MEMORY")" \
+    "$RB_CPUS" "$RB_PIDS" "$RB_TTL" "$RB_SYSTEMD" "$(json_str "$RB_WORKDIR")" "$RB_WEIGHT"
+}
+
+json_str() { printf '"%s"' "$(printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g')"; }
 
 # --- readings --------------------------------------------------------------
 read_int()  { [[ -r "$1" ]] && tr -d '[:space:]' < "$1" || echo 0; }
@@ -103,9 +177,9 @@ spawn_one() {
   local t0 t1 code
   t0=$(date +%s.%N)
   code=$(curl -o /dev/null -sS -w '%{http_code}' --max-time 120 \
-    -X POST "$ORCH$SPAWN_PATH" \
+    -X POST "$ORCH/instances" \
     -H "$(auth_hdr)" -H 'Content-Type: application/json' \
-    -d "{\"attempt_id\":\"$id\",\"runbook\":\"$RUNBOOK\"}" || echo 000)
+    -d "{\"attempt_id\":\"$id\",\"runbook\":$(runbook_json)}" || echo 000)
   t1=$(date +%s.%N)
   local lat; lat=$(awk -v a="$t0" -v b="$t1" 'BEGIN{printf "%.2f", b-a}')
   echo "$id,$step,$lat,$code" >> "$SPAWNS"
@@ -132,7 +206,7 @@ teardown() {
   log "tearing down ${#ATTEMPTS[@]} sandbox(es)"
   for id in "${ATTEMPTS[@]:-}"; do
     [[ -z "$id" ]] && continue
-    curl -o /dev/null -sS --max-time 60 -X DELETE "$ORCH$DESTROY_PATH/$id" -H "$(auth_hdr)" || true
+    curl -o /dev/null -sS --max-time 60 -X DELETE "$ORCH/instances/$id" -H "$(auth_hdr)" || true
   done
   # The reaper is the backstop, but a benchmark that relies on the backstop is
   # not testing what it thinks it is. Verify the box actually drained.
