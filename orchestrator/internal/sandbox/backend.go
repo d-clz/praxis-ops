@@ -20,6 +20,14 @@ const (
 	LabelRunbook = "praxis.runbook-digest"
 	LabelExpires = "praxis.expires-at"
 
+	// LabelSpawnedAt and LabelWeight exist for internal/metrics -- see its
+	// labels.go, which must match these exactly. A container without them
+	// still parses (SpawnedAt zero, Weight defaults to 1); they were added
+	// after the ones above and older tooling should not choke on their
+	// absence.
+	LabelSpawnedAt = "praxis.spawned-at"
+	LabelWeight    = "praxis.weight"
+
 	ManagedValue = "praxis-orchestrator"
 	NamePrefix   = "sbx-"
 )

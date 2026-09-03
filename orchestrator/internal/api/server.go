@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"time"
 
+	"praxis-orchestrator/internal/metrics"
 	"praxis-orchestrator/internal/sandbox"
 )
 
@@ -23,12 +24,13 @@ type Config struct {
 
 type Server struct {
 	backend sandbox.Backend
+	reg     *metrics.Registry
 	cfg     Config
 	log     *slog.Logger
 }
 
-func New(b sandbox.Backend, cfg Config, log *slog.Logger) *Server {
-	return &Server{backend: b, cfg: cfg, log: log}
+func New(b sandbox.Backend, reg *metrics.Registry, cfg Config, log *slog.Logger) *Server {
+	return &Server{backend: b, reg: reg, cfg: cfg, log: log}
 }
 
 func (s *Server) Routes() http.Handler {
@@ -40,6 +42,10 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("POST /instances/{attemptID}/exec", s.auth(http.HandlerFunc(s.exec)))
 	mux.Handle("POST /instances/{attemptID}/shell", s.auth(http.HandlerFunc(s.shell)))
 	mux.Handle("POST /reap", s.auth(http.HandlerFunc(s.reap)))
+	// Same auth as everything but /healthz -- /sessions carries attempt_id,
+	// which deserves the same protection as GET /instances/{id}.
+	mux.Handle("GET /metrics", s.auth(metrics.Handler(s.reg)))
+	mux.Handle("GET /sessions", s.auth(metrics.SessionsHandler(s.reg)))
 	return mux
 }
 
@@ -76,6 +82,13 @@ func (s *Server) healthz(w http.ResponseWriter, r *http.Request) {
 // create treats attempt_id as the idempotency key. A repeat call returns the
 // first instance rather than spawning a second one -- that is what makes a
 // portal timeout or retry safe.
+//
+// Spawn outcomes are classified ok/conflict/denied_capacity/error for
+// internal/metrics. Note this classification happens here, in the handler,
+// not inside Create() itself: Create() silently absorbs a name collision
+// into a successful Get()-based return (see container.go) rather than
+// surfacing it as an error, so "conflict" can only be known from the Get()
+// pre-check already done below, before Create() is ever called.
 func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 	var req createReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -83,16 +96,21 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, err := s.backend.Get(r.Context(), req.AttemptID); errors.Is(err, sandbox.ErrNotFound) {
+	_, getErr := s.backend.Get(r.Context(), req.AttemptID)
+	isNew := errors.Is(getErr, sandbox.ErrNotFound)
+
+	if isNew {
 		// Only a genuinely new instance consumes a slot. On one box the budget
 		// guard is load bearing, not defensive: a leaked instance is a
 		// meaningful fraction of total capacity.
 		n, cErr := s.backend.CountRunning(r.Context())
 		if cErr != nil {
+			s.reg.IncSpawn("error")
 			writeErr(w, http.StatusServiceUnavailable, cErr.Error())
 			return
 		}
 		if n >= s.cfg.MaxConcurrent {
+			s.reg.IncSpawn("denied_capacity")
 			writeErr(w, http.StatusTooManyRequests, "at capacity")
 			return
 		}
@@ -100,6 +118,7 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 
 	inst, err := s.backend.Create(r.Context(), req.AttemptID, req.Runbook)
 	if err != nil {
+		s.reg.IncSpawn("error")
 		switch {
 		case errors.Is(err, sandbox.ErrInvalidRunbook), errors.Is(err, sandbox.ErrInvalidAttemptID):
 			writeErr(w, http.StatusBadRequest, err.Error())
@@ -108,6 +127,14 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusInternalServerError, "spawn failed")
 		}
 		return
+	}
+
+	if isNew {
+		s.reg.IncSpawn("ok")
+	} else {
+		// Idempotency hit, not a failure -- a spike here means the portal is
+		// retrying against a live attempt_id, not that spawning failed.
+		s.reg.IncSpawn("conflict")
 	}
 	writeJSON(w, http.StatusAccepted, inst)
 }
@@ -129,8 +156,12 @@ func (s *Server) destroy(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("attemptID")
 	ok, err := s.backend.Destroy(r.Context(), id)
 	if err != nil {
+		s.reg.IncDestroy("error")
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
+	}
+	if ok {
+		s.reg.IncDestroy("explicit")
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"attempt_id": id, "destroyed": ok})
 }
@@ -258,11 +289,21 @@ func relayBytes(portal, term io.ReadWriteCloser) {
 	<-done
 }
 
+// reap is the manual, on-demand trigger -- an operator poking it, not the
+// automatic background path. The automatic one (cmd/orchestrator/main.go's
+// tick) does not call this; it derives its own expiry decision from the same
+// metrics.CollectManaged snapshot it publishes, so there is exactly one
+// codepath computing "is this expired" for the automatic case. This handler
+// keeps Backend.Reap()'s own independent implementation for manual use, a
+// known, accepted duplication rather than a refactor in scope here.
 func (s *Server) reap(w http.ResponseWriter, r *http.Request) {
 	killed, err := s.backend.Reap(r.Context())
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	for range killed {
+		s.reg.IncDestroy("ttl")
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"reaped": killed})
 }

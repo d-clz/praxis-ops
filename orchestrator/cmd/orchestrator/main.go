@@ -21,8 +21,11 @@ import (
 	"time"
 
 	"praxis-orchestrator/internal/api"
+	"praxis-orchestrator/internal/metrics"
 	"praxis-orchestrator/internal/sandbox"
 )
+
+var version = "dev"
 
 func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -45,16 +48,23 @@ func main() {
 	}
 	defer backend.Close()
 
+	reg := metrics.NewRegistry("orchestrator", version)
+
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           api.New(backend, api.Config{Token: token, MaxConcurrent: maxConcurrent, ExecTimeout: execTimeout}, log).Routes(),
+		Handler:           api.New(backend, reg, api.Config{Token: token, MaxConcurrent: maxConcurrent, ExecTimeout: execTimeout}, log).Routes(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	go reaper(ctx, backend, reapEvery, log)
+	// backend.RawClient() satisfies metrics.Lister structurally (it's
+	// *client.Client, the same docker client backend already wraps) --
+	// passed separately rather than through the Backend interface itself,
+	// which stays runtime-neutral (a future KubernetesBackend has no reason
+	// to know about internal/metrics's types).
+	go reaper(ctx, backend, backend.RawClient(), reapEvery, reg, maxConcurrent, log)
 
 	go func() {
 		log.Info("orchestrator listening", "addr", addr, "max_concurrent", maxConcurrent)
@@ -74,7 +84,17 @@ func main() {
 // reaper enforces TTL. This is what makes a stateless orchestrator safe: if the
 // portal loses an attempt record, the container still dies on schedule, because
 // expiry does not depend on anyone remembering why the sandbox exists.
-func reaper(ctx context.Context, b sandbox.Backend, every time.Duration, log *slog.Logger) {
+//
+// The snapshot this reads is also what internal/metrics publishes -- one
+// list call serves both reaping and metrics, so a scrape costs nothing on the
+// socket and the two can never disagree about what's actually running
+// (docs/observability-wiring.md §1). This is why it drives destroys through
+// lister+Backend.Destroy per session rather than calling Backend.Reap(): that
+// method does its own independent listing internally, which is exactly the
+// two-views-disagreeing risk this design avoids. Backend.Reap() still exists
+// and is still used by the manual POST /reap endpoint -- a known, accepted
+// second implementation for on-demand use, not touched here.
+func reaper(ctx context.Context, b sandbox.Backend, lister metrics.Lister, every time.Duration, reg *metrics.Registry, capacityLimit int, log *slog.Logger) {
 	ticker := time.NewTicker(every)
 	defer ticker.Stop()
 	for {
@@ -82,16 +102,48 @@ func reaper(ctx context.Context, b sandbox.Backend, every time.Duration, log *sl
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			killed, err := b.Reap(ctx)
-			if err != nil {
-				log.Error("reap cycle failed", "err", err)
-				continue
-			}
-			if len(killed) > 0 {
-				log.Info("reaped expired sandboxes", "count", len(killed), "attempts", killed)
-			}
+			reapTick(ctx, b, lister, reg, capacityLimit, log)
 		}
 	}
+}
+
+func reapTick(ctx context.Context, b sandbox.Backend, lister metrics.Lister, reg *metrics.Registry, capacityLimit int, log *slog.Logger) {
+	start := time.Now()
+
+	snap := metrics.CollectManaged(ctx, lister)
+	if snap.Err != nil {
+		log.Error("reap cycle: collection failed", "err", snap.Err)
+		reg.SetSnapshot(snap) // publish the failure; a stale zero is worse
+		return
+	}
+
+	now := time.Now()
+	var killed []string
+	for _, sess := range snap.Sessions {
+		if !sess.Expired(now) {
+			continue
+		}
+		ok, err := b.Destroy(ctx, sess.AttemptID)
+		if err != nil {
+			reg.IncDestroy("error")
+			log.Error("reap destroy failed", "attempt_id", sess.AttemptID, "err", err)
+			continue
+		}
+		if ok {
+			reg.IncDestroy("ttl")
+			killed = append(killed, sess.AttemptID)
+		}
+	}
+	if len(killed) > 0 {
+		log.Info("reaped expired sandboxes", "count", len(killed), "attempts", killed)
+	}
+
+	reg.SetSnapshot(snap)
+	reg.SetCapacity(metrics.WeightInFlight(snap), capacityLimit)
+	// Only on a completed tick, deliberately: PraxisReaperStalled fires on
+	// the ABSENCE of progress, which catches a deadlock an error counter
+	// would not (docs/observability-wiring.md §1).
+	reg.ObserveReaper(time.Since(start))
 }
 
 func envOr(key, def string) string {

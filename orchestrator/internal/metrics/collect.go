@@ -15,7 +15,8 @@ import (
 // socket.
 //
 // NOTE: v25 client surface. On v26+ this becomes
-//   ContainerList(ctx, container.ListOptions) ([]container.Summary, error)
+//
+//	ContainerList(ctx, container.ListOptions) ([]container.Summary, error)
 type Lister interface {
 	ContainerList(ctx context.Context, opts types.ContainerListOptions) ([]types.Container, error)
 }
@@ -136,10 +137,10 @@ func SessionsHandler(r *Registry) http.Handler {
 			out = append(out, r)
 		}
 		writeJSON(w, map[string]any{
-			"view":         snap.View,
-			"taken_at":     snap.TakenAt.Format(TimeFormat),
-			"total_seen":   snap.Total,
-			"sessions":     out,
+			"view":          snap.View,
+			"taken_at":      snap.TakenAt.Format(TimeFormat),
+			"total_seen":    snap.Total,
+			"sessions":      out,
 			"orphan_counts": snap.Orphans,
 		})
 	})

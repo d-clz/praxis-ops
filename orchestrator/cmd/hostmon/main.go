@@ -24,12 +24,13 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/docker/docker/client"
 
-	"github.com/tpb/praxis-orchestrator/internal/metrics"
+	"praxis-orchestrator/internal/metrics"
 )
 
 var version = "dev"
@@ -170,13 +171,35 @@ func collectStats(ctx context.Context, cli *client.Client, snap metrics.Snapshot
 	return out
 }
 
+// warnPathOnce logs a misconfigured or missing path exactly once, not once
+// per 15s poll. Without this, a wrong PRAXIS_SLICE_PATH reads identically to
+// "genuinely zero pressure, all healthy" -- readIntFile and readPressure
+// both fail silently to 0 on a missing file, and that ambiguity is exactly
+// the sharper problem: the gap becomes invisible instead of loud.
+var (
+	warnOnceMu sync.Mutex
+	warnedOnce = map[string]bool{}
+)
+
+func warnPathOnce(path string, err error) {
+	warnOnceMu.Lock()
+	defer warnOnceMu.Unlock()
+	if warnedOnce[path] {
+		return
+	}
+	warnedOnce[path] = true
+	log.Printf("hostmon: cannot read %s (%v) -- this metric will report 0 until the path exists, not because the value is genuinely zero", path, err)
+}
+
 func readIntFile(path string) int {
 	b, err := os.ReadFile(path)
 	if err != nil {
+		warnPathOnce(path, err)
 		return 0
 	}
 	n, err := strconv.Atoi(strings.TrimSpace(string(b)))
 	if err != nil {
+		warnPathOnce(path, err)
 		return 0
 	}
 	return n
@@ -190,6 +213,7 @@ func readIntFile(path string) int {
 func readPressure(path string) (some, full float64) {
 	f, err := os.Open(path)
 	if err != nil {
+		warnPathOnce(path, err)
 		return 0, 0
 	}
 	defer f.Close()
@@ -221,6 +245,7 @@ func readPressure(path string) (some, full float64) {
 func freeBytes(path string) uint64 {
 	var st syscall.Statfs_t
 	if err := syscall.Statfs(path, &st); err != nil {
+		warnPathOnce(path, err)
 		return 0
 	}
 	return st.Bavail * uint64(st.Bsize)

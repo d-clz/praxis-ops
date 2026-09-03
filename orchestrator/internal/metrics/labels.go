@@ -3,18 +3,24 @@ package metrics
 import (
 	"strconv"
 	"time"
+
+	"praxis-orchestrator/internal/sandbox"
 )
 
-// Label keys. These are ASSUMED to match what internal/sandbox stamps onto
-// containers at spawn. If the orchestrator uses different keys, change them
-// here only — collect.go and cmd/hostmon both read from this file, and a
-// mismatch turns every managed container into a reported orphan.
+// Label keys. These used to be a second, hand-copied set of string literals
+// here -- and they were wrong (underscores, where internal/sandbox actually
+// stamps hyphens: praxis.attempt-id, not praxis.attempt_id). A mismatch here
+// turns every managed container into a reported orphan, silently, since
+// nothing fails loudly when a label key just doesn't match. Referencing
+// internal/sandbox's own constants instead of copying their values makes
+// that class of bug impossible to reintroduce: there is exactly one place
+// these are defined now.
 const (
-	LabelAttemptID = "praxis.attempt_id"
-	LabelRunbook   = "praxis.runbook"
-	LabelExpiresAt = "praxis.expires_at"
-	LabelSpawnedAt = "praxis.spawned_at"
-	LabelWeight    = "praxis.weight"
+	LabelAttemptID = sandbox.LabelAttempt
+	LabelRunbook   = sandbox.LabelRunbook
+	LabelExpiresAt = sandbox.LabelExpires
+	LabelSpawnedAt = sandbox.LabelSpawnedAt
+	LabelWeight    = sandbox.LabelWeight
 )
 
 // TimeFormat is the serialisation assumed for the two timestamp labels.

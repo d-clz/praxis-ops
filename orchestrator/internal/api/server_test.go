@@ -12,8 +12,11 @@ import (
 	"testing"
 	"time"
 
+	"praxis-orchestrator/internal/metrics"
 	"praxis-orchestrator/internal/sandbox"
 )
+
+func testRegistry() *metrics.Registry { return metrics.NewRegistry("orchestrator", "test") }
 
 // fakeBackend implements sandbox.Backend entirely in memory. No podman, no
 // docker socket -- that's the point: the API layer's job (auth, status
@@ -68,7 +71,7 @@ func testLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard,
 func TestAuth_RejectsMissingOrWrongToken(t *testing.T) {
 	be := newFakeBackend()
 	be.instances["a"] = sandbox.Instance{AttemptID: "a", Status: sandbox.StatusRunning}
-	ts := httptest.NewServer(New(be, Config{Token: "secret"}, testLogger()).Routes())
+	ts := httptest.NewServer(New(be, testRegistry(), Config{Token: "secret"}, testLogger()).Routes())
 	defer ts.Close()
 
 	for _, tok := range []string{"", "wrong"} {
@@ -90,7 +93,7 @@ func TestAuth_RejectsMissingOrWrongToken(t *testing.T) {
 func TestAuth_AllowsCorrectToken(t *testing.T) {
 	be := newFakeBackend()
 	be.instances["a"] = sandbox.Instance{AttemptID: "a", Status: sandbox.StatusRunning}
-	ts := httptest.NewServer(New(be, Config{Token: "secret"}, testLogger()).Routes())
+	ts := httptest.NewServer(New(be, testRegistry(), Config{Token: "secret"}, testLogger()).Routes())
 	defer ts.Close()
 
 	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/instances/a", nil)
@@ -107,7 +110,7 @@ func TestAuth_AllowsCorrectToken(t *testing.T) {
 
 func TestShell_ConflictWhenNotRunning(t *testing.T) {
 	be := newFakeBackend() // no instance registered at all
-	ts := httptest.NewServer(New(be, Config{Token: "secret"}, testLogger()).Routes())
+	ts := httptest.NewServer(New(be, testRegistry(), Config{Token: "secret"}, testLogger()).Routes())
 	defer ts.Close()
 
 	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/instances/nope/shell", nil)
@@ -119,6 +122,84 @@ func TestShell_ConflictWhenNotRunning(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusConflict {
 		t.Errorf("status = %d, want 409 (no exec, no hijack, should have happened for a non-running instance)", resp.StatusCode)
+	}
+}
+
+// TestCreate_ClassifiesOkThenConflict exercises the classification server.go
+// derives from the Get() pre-check, since Create() itself never reports a
+// conflict as an error -- it silently returns the existing instance (see
+// container.go). A spike in "conflict" means the portal is retrying against
+// a live attempt_id, not that spawning is failing; folding it into "error"
+// would hide exactly the signal PraxisSpawnConflictSpike exists to catch.
+func TestCreate_ClassifiesOkThenConflict(t *testing.T) {
+	be := newFakeBackend()
+	ts := httptest.NewServer(New(be, testRegistry(), Config{Token: "secret", MaxConcurrent: 10}, testLogger()).Routes())
+	defer ts.Close()
+
+	post := func(id string) int {
+		body := strings.NewReader(`{"attempt_id":"` + id + `","runbook":{}}`)
+		req, _ := http.NewRequest(http.MethodPost, ts.URL+"/instances", body)
+		req.Header.Set("X-Praxis-Token", "secret")
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("POST /instances: %v", err)
+		}
+		defer resp.Body.Close()
+		return resp.StatusCode
+	}
+
+	if code := post("dup-1"); code != http.StatusAccepted {
+		t.Fatalf("first create: status = %d, want 202", code)
+	}
+	if code := post("dup-1"); code != http.StatusAccepted {
+		t.Fatalf("repeat create: status = %d, want 202 (idempotent, not an error)", code)
+	}
+
+	metricsReq, _ := http.NewRequest(http.MethodGet, ts.URL+"/metrics", nil)
+	metricsReq.Header.Set("X-Praxis-Token", "secret")
+	resp, err := http.DefaultClient.Do(metricsReq)
+	if err != nil {
+		t.Fatalf("GET /metrics: %v", err)
+	}
+	defer resp.Body.Close()
+	buf := new(strings.Builder)
+	io.Copy(buf, resp.Body)
+	out := buf.String()
+
+	if !strings.Contains(out, `praxis_spawn_total{result="ok"} 1`) {
+		t.Errorf("expected exactly one result=\"ok\" spawn, got:\n%s", out)
+	}
+	if !strings.Contains(out, `praxis_spawn_total{result="conflict"} 1`) {
+		t.Errorf("expected exactly one result=\"conflict\" spawn, got:\n%s", out)
+	}
+}
+
+func TestDestroy_IncrementsExplicit(t *testing.T) {
+	be := newFakeBackend()
+	be.instances["gone"] = sandbox.Instance{AttemptID: "gone", Status: sandbox.StatusRunning}
+	ts := httptest.NewServer(New(be, testRegistry(), Config{Token: "secret"}, testLogger()).Routes())
+	defer ts.Close()
+
+	req, _ := http.NewRequest(http.MethodDelete, ts.URL+"/instances/gone", nil)
+	req.Header.Set("X-Praxis-Token", "secret")
+	if _, err := http.DefaultClient.Do(req); err != nil {
+		t.Fatalf("DELETE: %v", err)
+	}
+
+	metricsReq, _ := http.NewRequest(http.MethodGet, ts.URL+"/metrics", nil)
+	metricsReq.Header.Set("X-Praxis-Token", "secret")
+	resp, err := http.DefaultClient.Do(metricsReq)
+	if err != nil {
+		t.Fatalf("GET /metrics: %v", err)
+	}
+	defer resp.Body.Close()
+	buf := new(strings.Builder)
+	io.Copy(buf, resp.Body)
+	out := buf.String()
+
+	if !strings.Contains(out, `praxis_destroy_total{reason="explicit"} 1`) {
+		t.Errorf("expected reason=\"explicit\" destroy, got:\n%s", out)
 	}
 }
 
@@ -134,7 +215,7 @@ func TestShell_RelaysBytesBothWays(t *testing.T) {
 	sandboxSide, testSide := net.Pipe()
 	be.shellConn = sandboxSide
 
-	ts := httptest.NewServer(New(be, Config{Token: "secret"}, testLogger()).Routes())
+	ts := httptest.NewServer(New(be, testRegistry(), Config{Token: "secret"}, testLogger()).Routes())
 	defer ts.Close()
 
 	conn, err := net.DialTimeout("tcp", ts.Listener.Addr().String(), 2*time.Second)

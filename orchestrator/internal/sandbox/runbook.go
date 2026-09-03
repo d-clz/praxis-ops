@@ -27,6 +27,14 @@ type Runbook struct {
 	Entrypoint    []string          `yaml:"entrypoint"`
 	Workdir       string            `yaml:"workdir"`
 
+	// Weight is the admission unit internal/metrics sums against
+	// PRAXIS_CAPACITY_WEIGHT. A flat container count under-admits a light
+	// ticket and over-admits a heavy one -- CPT-01 (systemd + nginx + three
+	// faults) is several times SKN-01 (files and grep). Zero/unset means "not
+	// specified", not "free": container.go's spec() treats <= 0 as 1, the
+	// same default ParseSession uses on the read side in internal/metrics.
+	Weight int `yaml:"weight"`
+
 	// ReadOnly is false for ops sandboxes on purpose. The candidate must edit
 	// configs, kill processes and write files -- that is the exercise.
 	// Immutability here comes from "destroy and respawn from a pinned digest",
@@ -52,6 +60,7 @@ func DefaultRunbook() Runbook {
 		RootInSandbox: true,
 		Workdir:       "/home/candidate",
 		Tmpfs:         map[string]string{"/tmp": "size=64m"},
+		Weight:        1,
 	}
 }
 
