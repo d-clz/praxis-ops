@@ -95,6 +95,15 @@ func main() {
 // and is still used by the manual POST /reap endpoint -- a known, accepted
 // second implementation for on-demand use, not touched here.
 func reaper(ctx context.Context, b sandbox.Backend, lister metrics.Lister, every time.Duration, reg *metrics.Registry, capacityLimit int, log *slog.Logger) {
+	// Prime immediately, not just on the first ticker fire. Confirmed against
+	// a real restart: without this, /metrics and /sessions read a fully empty
+	// snapshot (Sessions=nil, taken_at the zero time) for up to a full
+	// PRAXIS_REAP_INTERVAL after every restart -- indistinguishable from an
+	// actually idle box for as long as 30s by default. hostmon's own main.go
+	// already primes once before its ticker loop for exactly this reason;
+	// this just brings the orchestrator's reaper in line with it.
+	reapTick(ctx, b, lister, reg, capacityLimit, log)
+
 	ticker := time.NewTicker(every)
 	defer ticker.Stop()
 	for {
