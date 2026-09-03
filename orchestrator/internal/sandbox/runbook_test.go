@@ -1,10 +1,44 @@
 package sandbox
 
 import (
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
 )
+
+// TestRunbook_JSONFieldNames is the regression test for a bug found running
+// a real POST /instances by hand: without explicit json tags, encoding/json
+// falls back to case-insensitive matching against the Go field name, which
+// is NOT the same as tolerating underscores. A body using the yaml-style
+// snake_case names silently left TTLSeconds and PidsLimit at their zero
+// value -- Decode() reported no error at all, and Validate() then produced
+// a confusing "ttl_seconds must be within (0,86400], got 0" naming the
+// field that never received its value.
+func TestRunbook_JSONFieldNames(t *testing.T) {
+	body := `{
+		"image": "praxis/ops-base@sha256:deadbeef",
+		"network": "none",
+		"memory": "256m",
+		"cpus": 1.0,
+		"pids_limit": 64,
+		"ttl_seconds": 600,
+		"workdir": "/home/candidate"
+	}`
+	var rb Runbook
+	if err := json.Unmarshal([]byte(body), &rb); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if rb.TTLSeconds != 600 {
+		t.Errorf("TTLSeconds = %d, want 600 (json:\"ttl_seconds\" tag missing?)", rb.TTLSeconds)
+	}
+	if rb.PidsLimit != 64 {
+		t.Errorf("PidsLimit = %d, want 64 (json:\"pids_limit\" tag missing?)", rb.PidsLimit)
+	}
+	if err := rb.Validate(); err != nil {
+		t.Errorf("a fully-populated JSON body should validate cleanly, got: %v", err)
+	}
+}
 
 // This is Phase D item 2 (docs/session-02-plan.md), written down as a test
 // instead of just prose: a locally-built image has no digest to pin, and

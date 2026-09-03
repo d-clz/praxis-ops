@@ -11,21 +11,34 @@ import (
 // Runbook is declarative and backend-neutral. It must never carry Docker or
 // Kubernetes native specs -- that is what keeps the k8s backend a new
 // implementation rather than a rewrite.
+//
+// Every field carries both yaml and json tags, kept identical on purpose:
+// this struct is unmarshaled two ways (LoadScenario's YAML, and the raw
+// JSON body of POST /instances' createReq.Runbook) and a caller building
+// either one should be able to use the same field names. Without an
+// explicit json tag, encoding/json falls back to case-insensitive matching
+// against the Go field name -- which is NOT the same as tolerating the
+// underscore in "ttl_seconds" vs "TTLSeconds". A JSON body using the yaml
+// convention silently left TTLSeconds and PidsLimit at their zero value
+// before these tags existed, past Decode() without an error, all the way to
+// Validate() reporting a confusing "ttl_seconds must be within (0,86400],
+// got 0" -- confusing because it names the field that never received its
+// value, not the field that was actually sent.
 type Runbook struct {
 	// Image MUST be digest-pinned. A tag would let the fault drift between
 	// spawns and break determinism.
-	Image string `yaml:"image"`
+	Image string `yaml:"image" json:"image"`
 
-	Systemd       bool              `yaml:"systemd"`
-	RootInSandbox bool              `yaml:"root_in_sandbox"`
-	Network       string            `yaml:"network"` // none | internal
-	Memory        string            `yaml:"memory"`
-	CPUs          float64           `yaml:"cpus"`
-	PidsLimit     int64             `yaml:"pids_limit"`
-	TTLSeconds    int               `yaml:"ttl_seconds"`
-	Tmpfs         map[string]string `yaml:"tmpfs"`
-	Entrypoint    []string          `yaml:"entrypoint"`
-	Workdir       string            `yaml:"workdir"`
+	Systemd       bool              `yaml:"systemd" json:"systemd"`
+	RootInSandbox bool              `yaml:"root_in_sandbox" json:"root_in_sandbox"`
+	Network       string            `yaml:"network" json:"network"` // none | internal
+	Memory        string            `yaml:"memory" json:"memory"`
+	CPUs          float64           `yaml:"cpus" json:"cpus"`
+	PidsLimit     int64             `yaml:"pids_limit" json:"pids_limit"`
+	TTLSeconds    int               `yaml:"ttl_seconds" json:"ttl_seconds"`
+	Tmpfs         map[string]string `yaml:"tmpfs" json:"tmpfs,omitempty"`
+	Entrypoint    []string          `yaml:"entrypoint" json:"entrypoint,omitempty"`
+	Workdir       string            `yaml:"workdir" json:"workdir"`
 
 	// Weight is the admission unit internal/metrics sums against
 	// PRAXIS_CAPACITY_WEIGHT. A flat container count under-admits a light
@@ -33,13 +46,13 @@ type Runbook struct {
 	// faults) is several times SKN-01 (files and grep). Zero/unset means "not
 	// specified", not "free": container.go's spec() treats <= 0 as 1, the
 	// same default ParseSession uses on the read side in internal/metrics.
-	Weight int `yaml:"weight"`
+	Weight int `yaml:"weight" json:"weight,omitempty"`
 
 	// ReadOnly is false for ops sandboxes on purpose. The candidate must edit
 	// configs, kill processes and write files -- that is the exercise.
 	// Immutability here comes from "destroy and respawn from a pinned digest",
 	// not from a frozen rootfs. Keep it true only for batch grader containers.
-	ReadOnly bool `yaml:"read_only"`
+	ReadOnly bool `yaml:"read_only" json:"read_only"`
 }
 
 // scenarioFile is the subset of tickets/<KEY>/scenario.yaml the orchestrator
