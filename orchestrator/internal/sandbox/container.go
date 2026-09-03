@@ -353,6 +353,16 @@ func (b *ContainerBackend) spec(rb Runbook, attemptID string, spawnedAt, expires
 		},
 		SecurityOpt: []string{"no-new-privileges"},
 		CapDrop:     []string{"ALL"},
+		// Confirmed live and dangerous, not theoretical: without this, a
+		// container spawned through this exact code path maps its root
+		// process to host uid 1001 -- praxis-sbx itself, the account that
+		// owns the podman socket, the image store, and this orchestrator
+		// process. An escape would own everything, not nothing. Every
+		// verification this session (50-verify.sh, preflight-ticket.sh,
+		// verify-shell-isolation.sh) spawns with --userns auto explicitly;
+		// this was the one path that never did, because it never went
+		// through any of those scripts' spawn flags at all -- it has its own.
+		UsernsMode: "auto",
 	}
 
 	if rb.Systemd {
