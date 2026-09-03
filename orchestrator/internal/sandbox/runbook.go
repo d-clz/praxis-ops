@@ -126,3 +126,17 @@ func (r Runbook) Digest() string {
 func (r Runbook) TTL() time.Duration {
 	return time.Duration(r.TTLSeconds) * time.Second
 }
+
+// EffectiveWeight is Weight with the "unset means 1, not 0" default applied.
+// The single place this logic lives: container.go's spec() (stamping
+// praxis.weight) and internal/api's admission check both need it, and a
+// second hand-copied "<= 0 ? 1 : Weight" would be exactly the kind of
+// silent-drift bug internal/metrics/labels.go already caused once this
+// session (see its own comment on why it now references sandbox's label
+// constants directly instead of duplicating them).
+func (r Runbook) EffectiveWeight() int {
+	if r.Weight <= 0 {
+		return 1
+	}
+	return r.Weight
+}

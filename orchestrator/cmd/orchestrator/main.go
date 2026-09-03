@@ -38,7 +38,13 @@ func main() {
 
 	addr := envOr("PRAXIS_LISTEN", "127.0.0.1:8081")
 	reapEvery := time.Duration(envInt("PRAXIS_REAP_INTERVAL", 30)) * time.Second
-	maxConcurrent := envInt("PRAXIS_MAX_CONCURRENT", 3)
+	// Weight, not a flat container count: PRAXIS_MAX_CONCURRENT is retired.
+	// Every current ticket (SJN-01/SKN-01/CPT-01) leaves Runbook.Weight unset,
+	// which EffectiveWeight() treats as 1 -- so a weight budget of 2 behaves
+	// identically to max_concurrent=2 today. The default here matches that
+	// same value on purpose, for the same RAM-budget reason
+	// docs/session-02-plan.md Phase D item 5 already established.
+	capacityWeight := envInt("PRAXIS_CAPACITY_WEIGHT", 2)
 	execTimeout := time.Duration(envInt("PRAXIS_EXEC_TIMEOUT", 120)) * time.Second
 
 	backend, err := sandbox.NewContainerBackend()
@@ -50,24 +56,30 @@ func main() {
 
 	reg := metrics.NewRegistry("orchestrator", version)
 
+	// backend.RawClient() satisfies metrics.Lister structurally (it's
+	// *client.Client, the same docker client backend already wraps) --
+	// passed separately rather than through the Backend interface itself,
+	// which stays runtime-neutral (a future KubernetesBackend has no reason
+	// to know about internal/metrics's types). Shared by the reaper and the
+	// API server's admission check -- see api.New's comment on why admission
+	// does its own live list rather than reading reg's cached snapshot.
+	lister := backend.RawClient()
+
 	srv := &http.Server{
-		Addr:              addr,
-		Handler:           api.New(backend, reg, api.Config{Token: token, MaxConcurrent: maxConcurrent, ExecTimeout: execTimeout}, log).Routes(),
+		Addr: addr,
+		Handler: api.New(backend, lister, reg, api.Config{
+			Token: token, CapacityWeight: capacityWeight, ExecTimeout: execTimeout,
+		}, log).Routes(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	// backend.RawClient() satisfies metrics.Lister structurally (it's
-	// *client.Client, the same docker client backend already wraps) --
-	// passed separately rather than through the Backend interface itself,
-	// which stays runtime-neutral (a future KubernetesBackend has no reason
-	// to know about internal/metrics's types).
-	go reaper(ctx, backend, backend.RawClient(), reapEvery, reg, maxConcurrent, log)
+	go reaper(ctx, backend, lister, reapEvery, reg, capacityWeight, log)
 
 	go func() {
-		log.Info("orchestrator listening", "addr", addr, "max_concurrent", maxConcurrent)
+		log.Info("orchestrator listening", "addr", addr, "capacity_weight", capacityWeight)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Error("listen failed", "err", err)
 			stop()

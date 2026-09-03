@@ -1,7 +1,8 @@
 # Observability — monitoring, orphan reconciliation, capacity benchmark
 
 Scope: what the orchestrator exposes, what the independent host monitor exposes,
-how the two are compared, and how `PRAXIS_MAX_CONCURRENT` stops being a guess.
+how the two are compared, and how `PRAXIS_CAPACITY_WEIGHT` (Stage 4 -- replaced
+the flat `PRAXIS_MAX_CONCURRENT`) stops being a guess.
 
 ---
 
@@ -92,9 +93,9 @@ praxis_scrape_error{view="host"}
 ```
 
 **Cardinality.** No metric carries `attempt_id` except the two opt-in
-`praxis_session_*` gauges, which are off by default and bounded by
-`PRAXIS_MAX_CONCURRENT` anyway. Per-session detail for humans lives on
-`/sessions` (JSON), not in the metric namespace.
+`praxis_session_*` gauges, which are off by default and bounded by the
+number of concurrent sessions `PRAXIS_CAPACITY_WEIGHT` admits anyway. Per-session
+detail for humans lives on `/sessions` (JSON), not in the metric namespace.
 
 **Cost.** Both exporters cache. The orchestrator's snapshot is written by the
 reaper tick — one list call serves both reaping and metrics, so scraping adds
@@ -130,7 +131,7 @@ everything.
 
 ## 4. Capacity benchmark
 
-`bench/staircase.sh`. Replaces `PRAXIS_MAX_CONCURRENT=2` with a measured number.
+`bench/staircase.sh`. Replaces the guessed `PRAXIS_CAPACITY_WEIGHT=2` with a measured number.
 
 Method: spawn one weight-unit at a time, hold for `SOAK` seconds, sample, step
 up. Abort on the first stop condition. Report the last step that held.

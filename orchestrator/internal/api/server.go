@@ -17,20 +17,29 @@ import (
 )
 
 type Config struct {
-	Token         string
-	MaxConcurrent int
-	ExecTimeout   time.Duration
+	Token          string
+	CapacityWeight int
+	ExecTimeout    time.Duration
 }
 
 type Server struct {
 	backend sandbox.Backend
+	lister  metrics.Lister
 	reg     *metrics.Registry
 	cfg     Config
 	log     *slog.Logger
 }
 
-func New(b sandbox.Backend, reg *metrics.Registry, cfg Config, log *slog.Logger) *Server {
-	return &Server{backend: b, reg: reg, cfg: cfg, log: log}
+// lister is used ONLY for the admission check in create(), and deliberately
+// bypasses reg's cached snapshot to do it: reg is written once per
+// PRAXIS_REAP_INTERVAL (30s default -- see cmd/orchestrator/main.go's
+// reaper), which is fine for /metrics (a scrape reading a few-seconds-stale
+// gauge is normal) but not for a load-bearing admission gate, where up to
+// 30s of under-counted weight would mean genuine over-admission. One extra
+// list call per spawn request is a reasonable price for a check that only
+// runs on spawns, not on every scrape.
+func New(b sandbox.Backend, lister metrics.Lister, reg *metrics.Registry, cfg Config, log *slog.Logger) *Server {
+	return &Server{backend: b, lister: lister, reg: reg, cfg: cfg, log: log}
 }
 
 func (s *Server) Routes() http.Handler {
@@ -100,16 +109,22 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 	isNew := errors.Is(getErr, sandbox.ErrNotFound)
 
 	if isNew {
-		// Only a genuinely new instance consumes a slot. On one box the budget
-		// guard is load bearing, not defensive: a leaked instance is a
-		// meaningful fraction of total capacity.
-		n, cErr := s.backend.CountRunning(r.Context())
-		if cErr != nil {
+		// Only a genuinely new instance consumes budget. On one box the
+		// admission guard is load bearing, not defensive: a leaked instance is
+		// a meaningful fraction of total capacity. Weight, not a flat count --
+		// CPT-01 (systemd + nginx + three faults) is several times SKN-01
+		// (files and grep), and a flat count under-admits a light mix and
+		// over-admits a heavy one. A live CollectManaged, not reg's cached
+		// snapshot -- see the comment on lister in New().
+		snap := metrics.CollectManaged(r.Context(), s.lister)
+		if snap.Err != nil {
 			s.reg.IncSpawn("error")
-			writeErr(w, http.StatusServiceUnavailable, cErr.Error())
+			writeErr(w, http.StatusServiceUnavailable, snap.Err.Error())
 			return
 		}
-		if n >= s.cfg.MaxConcurrent {
+		used := metrics.WeightInFlight(snap)
+		incoming := req.Runbook.EffectiveWeight()
+		if used+incoming > s.cfg.CapacityWeight {
 			s.reg.IncSpawn("denied_capacity")
 			writeErr(w, http.StatusTooManyRequests, "at capacity")
 			return

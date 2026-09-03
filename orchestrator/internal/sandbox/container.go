@@ -320,19 +320,13 @@ func localImageRef(image string) string {
 }
 
 func (b *ContainerBackend) spec(rb Runbook, attemptID string, spawnedAt, expires time.Time) (*container.Config, *container.HostConfig) {
-	weight := rb.Weight
-	if weight <= 0 {
-		// Same default ParseSession uses on the read side in internal/metrics
-		// -- unset must never silently count as zero against the capacity budget.
-		weight = 1
-	}
 	labels := map[string]string{
 		LabelManaged:   ManagedValue,
 		LabelAttempt:   attemptID,
 		LabelRunbook:   rb.Digest(),
 		LabelExpires:   expires.Format(time.RFC3339),
 		LabelSpawnedAt: spawnedAt.Format(time.RFC3339),
-		LabelWeight:    strconv.Itoa(weight),
+		LabelWeight:    strconv.Itoa(rb.EffectiveWeight()),
 	}
 
 	cfg := &container.Config{

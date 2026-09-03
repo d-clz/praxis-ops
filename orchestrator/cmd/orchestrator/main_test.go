@@ -34,8 +34,8 @@ func TestEnvInt(t *testing.T) {
 		t.Errorf("envInt set = %d, want 7", got)
 	}
 	// A malformed value fails closed to the caller's default, not to zero and
-	// not by crashing -- an operator typo in PRAXIS_MAX_CONCURRENT or
-	// PRAXIS_EXEC_TIMEOUT should not silently zero out a concurrency limit or
+	// not by crashing -- an operator typo in PRAXIS_CAPACITY_WEIGHT or
+	// PRAXIS_EXEC_TIMEOUT should not silently zero out a capacity budget or
 	// a timeout.
 	t.Setenv("PRAXIS_TEST_INT_BAD", "not-a-number")
 	if got := envInt("PRAXIS_TEST_INT_BAD", 42); got != 42 {
