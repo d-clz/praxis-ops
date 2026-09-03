@@ -69,6 +69,22 @@ if [[ -z "$TOKEN" ]]; then
   echo "  export PRAXIS_API_TOKEN=\$(sudo grep PRAXIS_ORCH_TOKEN ~praxis-sbx/.config/praxis/orchestrator.env | cut -d= -f2)" >&2
   exit 1
 fi
+
+# $STORAGE lives inside praxis-sbx's own 0700 home. Run as anyone else and
+# `df` on it fails silently (2>/dev/null in storage_free_pct swallows a
+# permission error praxis can't even stat() through -- same "cannot chdir"
+# trap bootstrap/50-verify.sh already works around with as_sbx()), producing
+# an EMPTY reading. That empty string then compares as 0 against
+# STORAGE_MIN_PCT and aborts step 1 immediately with a stop-condition
+# message that has nothing to do with what's actually wrong. A safety check
+# silently producing a false trip is worse than no check -- fail loudly here,
+# before spawning anything, instead.
+if [[ "$(id -un)" != "praxis-sbx" && "$(id -u)" -ne 0 ]]; then
+  echo "ERROR: run as praxis-sbx -- its container storage and cgroup slice live under its own 0700 home, unreadable by any other user. e.g.:" >&2
+  echo "  sudo runuser -u praxis-sbx -- env XDG_RUNTIME_DIR=/run/user/1001 \\" >&2
+  echo "    PRAXIS_API_TOKEN=\"\$TOKEN\" RUNBOOK=$RUNBOOK IMAGE=\"\$IMAGE\" $0" >&2
+  exit 1
+fi
 if [[ -z "$IMAGE" ]]; then
   echo "ERROR: IMAGE is required -- see this script's header for why (no bake pipeline yet to resolve one)" >&2
   exit 1
