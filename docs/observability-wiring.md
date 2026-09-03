@@ -120,7 +120,10 @@ Verify the two views agree on an idle box — both should report zero sessions a
 zero orphans:
 
 ```bash
-curl -s 127.0.0.1:9101/metrics | grep -E 'praxis_(sessions_current|orphans)'
+# Same authenticated port as the rest of the API, not a separate 9101 --
+# see §4 above.
+curl -s -H "X-Praxis-Token: $PRAXIS_ORCH_TOKEN" 127.0.0.1:8081/metrics \
+  | grep -E 'praxis_(sessions_current|orphans)'
 curl -s 127.0.0.1:9102/metrics | grep -E 'praxis_(sessions_current|orphans|containers_total)'
 ```
 

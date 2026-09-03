@@ -16,10 +16,17 @@
 # in. A real unit exists (and this path is readable) whether zero containers
 # or several are running under it.
 #
-# PRAXIS_SLICE_PATH in praxis-hostmon.service already assumed exactly this
-# path -- /sys/fs/cgroup/user.slice/user-1001.slice/user@1001.service/
-# praxis-sbx.slice -- before this unit existed to back it; this closes that
-# gap, it doesn't change the assumption.
+# PRAXIS_SLICE_PATH assumed .../user@1001.service/praxis-sbx.slice before
+# this unit existed. Confirmed wrong against a real `systemctl --user status
+# praxis-sbx.slice`: systemd's own naming convention treats a hyphen in a
+# slice name as an implied parent -- the same reason user-1001.slice nests
+# under user.slice -- so "praxis-sbx.slice" silently nests under an implicit
+# praxis.slice systemd creates for it. The real path is
+# .../user@1001.service/praxis.slice/praxis-sbx.slice, one segment longer
+# than every PRAXIS_SLICE_PATH default assumed. Fixed in cmd/hostmon/main.go,
+# deploy/praxis-hostmon.service, and bench/staircase.sh to match -- not
+# renaming this unit to dodge the convention, since the convention is
+# systemd behaving correctly, not a bug to route around.
 
 [Unit]
 Description=Praxis sandbox slice -- every spawned container's cgroup nests here
@@ -32,3 +39,6 @@ Before=slices.target
 # keep in sync with PRAXIS_CAPACITY_WEIGHT by hand, and this unit exists to
 # give hostmon a stable place to read from -- not to be a second admission
 # control.
+
+[Install]
+WantedBy=default.target

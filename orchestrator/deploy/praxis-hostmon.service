@@ -25,7 +25,7 @@ RestartSec=5s
 Environment=PRAXIS_HOSTMON_LISTEN=127.0.0.1:9102
 Environment=DOCKER_HOST=unix:///run/user/1001/podman/podman.sock
 Environment=PRAXIS_HOSTMON_INTERVAL=15s
-Environment=PRAXIS_SLICE_PATH=/sys/fs/cgroup/user.slice/user-1001.slice/user@1001.service/praxis-sbx.slice
+Environment=PRAXIS_SLICE_PATH=/sys/fs/cgroup/user.slice/user-1001.slice/user@1001.service/praxis.slice/praxis-sbx.slice
 Environment=PRAXIS_STORAGE_PATH=/home/praxis-sbx/.local/share/containers
 # Per-session stats cost one API call per running container per poll.
 # Turn on for benchmarking, off for steady state.

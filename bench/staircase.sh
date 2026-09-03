@@ -54,7 +54,7 @@ MAX_WEIGHT="${MAX_WEIGHT:-16}"      # hard ceiling; the run stops here regardles
 SOAK="${SOAK:-180}"                 # seconds held per step
 SAMPLE="${SAMPLE:-5}"               # seconds between samples
 
-SLICE="${PRAXIS_SLICE_PATH:-/sys/fs/cgroup/user.slice/user-1001.slice/user@1001.service/praxis-sbx.slice}"
+SLICE="${PRAXIS_SLICE_PATH:-/sys/fs/cgroup/user.slice/user-1001.slice/user@1001.service/praxis.slice/praxis-sbx.slice}"
 STORAGE="${PRAXIS_STORAGE_PATH:-/home/praxis-sbx/.local/share/containers}"
 NEIGHBOUR_URL="${NEIGHBOUR_URL:-}"  # e.g. http://127.0.0.1/-/health ; skipped if empty
 

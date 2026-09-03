@@ -17,7 +17,7 @@ confirmed or fixed; kept here as a record, not an open question list.
 | Label keys `praxis.attempt_id`, `praxis.runbook`, `praxis.expires_at`, `praxis.spawned_at`, `praxis.weight` | **Wrong** -- real keys are hyphenated (`praxis.attempt-id`, `praxis.runbook-digest`, `praxis.expires-at`). `internal/metrics/labels.go` now references `internal/sandbox`'s own constants directly instead of a second hand-copied set, so this can't drift again. |
 | `expires_at` / `spawned_at` serialised as RFC3339 | Confirmed correct. |
 | Docker client is v25 (`types.ContainerListOptions`, `types.Container`) | Confirmed -- `go.mod` pins `v25.0.5+incompatible`. Breaks on v26+, unchanged risk, see note at bottom. |
-| Sandbox cgroup slice path `/sys/fs/cgroup/user.slice/user-1001.slice/user@1001.service/praxis-sbx.slice` | Now backed by a real unit: `deploy/praxis-sbx.slice`, referenced via `internal/sandbox.SandboxSlice` and set as every spawned container's `CgroupParent`. Previously just an env default with nothing creating the path. |
+| Sandbox cgroup slice path `/sys/fs/cgroup/user.slice/user-1001.slice/user@1001.service/praxis.slice/praxis-sbx.slice` | Now backed by a real unit: `deploy/praxis-sbx.slice`, referenced via `internal/sandbox.SandboxSlice` and set as every spawned container's `CgroupParent`. Previously just an env default with nothing creating the path. |
 | Spawn API is `POST {base}/v1/sandboxes` with `{"attempt_id","runbook"}` | **Wrong** -- real route is `POST {base}/instances` (port 8081, not 9100), auth is `X-Praxis-Token` not `Authorization: Bearer`, and `runbook` must be a fully inlined `Runbook` object, not a name (the orchestrator has no concept of a named runbook -- see `main.go`'s "knows nothing about tickets"). `bench/staircase.sh` now builds that object itself from the target ticket's own `scenario.yaml`. |
 
 ---
@@ -34,7 +34,7 @@ and fail independently.
   praxis-orchestrator.service           praxis-hostmon.service
   lists WITH label filter               lists ALL containers, no filter
   what the reaper can actually see      ground truth from the socket
-  :9101/metrics                         :9102/metrics
+  :8081/metrics (authed)                :9102/metrics (no auth)
 ```
 
 Set algebra, evaluated in Prometheus rather than in either process:
@@ -60,7 +60,7 @@ still the thing that tells you.
 Both exporters emit a `praxis_build_info` and a `praxis_scrape_error` so a dead
 collector is distinguishable from a genuine zero.
 
-### Orchestrator — `:9101/metrics`
+### Orchestrator — `:8081/metrics` (same authenticated listener as the rest of the API, not a separate port -- `docs/observability-wiring.md` §4 is explicit that metrics belong on the existing loopback API, and `internal/api/server.go`'s `Routes()` follows that: `/metrics`/`/sessions` sit in the same mux as `/instances`, behind the same `X-Praxis-Token`)
 
 ```
 praxis_sessions_current{view="orchestrator",state="created|running|exited"}

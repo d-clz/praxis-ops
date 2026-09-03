@@ -48,7 +48,7 @@ func loadConfig() config {
 	c := config{
 		listen:      env("PRAXIS_HOSTMON_LISTEN", "127.0.0.1:9102"),
 		dockerHost:  env("DOCKER_HOST", "unix:///run/user/1001/podman/podman.sock"),
-		slicePath:   env("PRAXIS_SLICE_PATH", "/sys/fs/cgroup/user.slice/user-1001.slice/user@1001.service/praxis-sbx.slice"),
+		slicePath:   env("PRAXIS_SLICE_PATH", "/sys/fs/cgroup/user.slice/user-1001.slice/user@1001.service/praxis.slice/praxis-sbx.slice"),
 		storagePath: env("PRAXIS_STORAGE_PATH", "/home/praxis-sbx/.local/share/containers"),
 		interval:    15 * time.Second,
 	}
