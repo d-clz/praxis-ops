@@ -68,6 +68,28 @@ both install steps are idempotent, so nothing extra happens on a run where
 neither did. `make deploy` refuses to run unprivileged rather than silently
 installing nothing or restarting the wrong unit.
 
+## Deploying hostmon (as `praxis`, with `sudo`)
+
+hostmon is the independent second view (`docs/observability.md`) -- its own
+process, its own `systemd --user` unit, its own deploy target, kept separate
+from the orchestrator's on purpose:
+
+```bash
+sudo make deploy-hostmon
+```
+
+Same shape as `make deploy` (builds, installs the binary and the current
+`.service` file into `praxis-sbx`'s home, reloads, restarts), deliberately a
+*different* target rather than folded into `deploy` -- hostmon's own
+`.service` header says its whole value is staying in a failure domain
+independent of the orchestrator's, so `sudo make deploy` restarting hostmon
+as a side effect (or a hostmon change forcing an orchestrator restart it
+never needed) would undercut the reason it exists. First-time activation is
+the same pattern as the orchestrator's own one-time setup above --
+`enable --now` once, `restart` (i.e. routine `make deploy-hostmon`) after
+that. hostmon has no token/env-file setup step: it reads the podman socket
+directly and serves everything unauthenticated on loopback, by design.
+
 ## Day-2 operations: `pxoctl`
 
 `make deploy` installs `deploy/pxoctl.sh` to `/usr/local/bin/pxoctl` --
@@ -75,8 +97,9 @@ root-owned, on the default PATH for every account including `sudo`'s (see the
 Makefile comment on why not `~/.local/bin`: `sudo`'s `secure_path`
 deliberately excludes per-user directories, so a copy only your own PATH can
 find works bare and then "command not found" the moment you put `sudo` in
-front of it). One binary name, two subcommand groups, two different failure
-classes -- check `unit` before `api`.
+front of it). One binary name, three subcommand groups, three different
+failure classes -- check `unit` before `api`; `hostmon` is checked
+independently of both, since staying that way is the entire point of it.
 
 ```bash
 sudo pxoctl unit status
@@ -87,6 +110,9 @@ sudo pxoctl unit stop
 
 pxoctl api health            # no root -- just hits /healthz
 sudo pxoctl api get attempt-1
+
+sudo pxoctl hostmon status   # same shape as unit, targeting praxis-hostmon
+pxoctl hostmon health        # no root, no token -- hostmon has no auth at all
 ```
 
 (Before the first `sudo make deploy`, or if working straight from a checkout,
@@ -107,6 +133,13 @@ realistic path anyway: the real portal, whenever it exists, calls this API
 with just the token, no local root at all). Built to grow: as more read-only
 routes land in `internal/api/server.go` (a bulk list-all-instances endpoint
 doesn't exist yet, for one), add a case under `api`, not a new script.
+
+**`hostmon`** exists to keep answering when `unit`/`api` can't -- its whole
+design point (`docs/observability.md`) is a failure domain independent of the
+orchestrator's, so this group is checked on its own, not as a fallback
+chained after the other two. `health` needs neither root nor a token:
+hostmon has no auth concept at all, by design (read-only, loopback-only,
+nothing here is worth gating).
 
 Never self-elevates. A subcommand that needs root says so and exits with the
 exact command to re-run -- `pxoctl.sh` will never prompt for your password on

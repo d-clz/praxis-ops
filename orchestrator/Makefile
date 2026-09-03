@@ -1,12 +1,17 @@
 BIN := orchestrator
 PKG := ./cmd/orchestrator
+HOSTMON_BIN := hostmon
+HOSTMON_PKG := ./cmd/hostmon
 SBX_USER := praxis-sbx
 SBX_HOME := $(shell getent passwd $(SBX_USER) | cut -d: -f6)
 
-.PHONY: build vet test deploy
+.PHONY: build vet test deploy build-hostmon deploy-hostmon
 
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o $(BIN) $(PKG)
+
+build-hostmon:
+	CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o $(HOSTMON_BIN) $(HOSTMON_PKG)
 
 vet:
 	go vet ./...
@@ -48,3 +53,21 @@ deploy: build
 	# /usr/local/bin is root-owned and in the default PATH for every account,
 	# sudo included -- one install location that both invocations agree on.
 	install -o root -g root -m 0755 deploy/pxoctl.sh /usr/local/bin/pxoctl
+
+# Separate from `deploy`, on purpose, not merely for symmetry: hostmon's own
+# .service header is explicit that its entire value is staying in a failure
+# domain independent of the orchestrator ("the whole value of this process
+# is that it keeps reporting when the orchestrator is wedged"). Folding its
+# deploy into the orchestrator's `deploy` would mean `sudo make deploy`
+# silently restarts hostmon too, or a hostmon-only change forces an
+# orchestrator restart it never needed -- exactly the coupling this process
+# exists to not have.
+deploy-hostmon: build-hostmon
+	@if [ "$$(id -u)" -ne 0 ]; then echo "run as root: sudo make deploy-hostmon" >&2; exit 1; fi
+	install -D -o $(SBX_USER) -g $(SBX_USER) -m 0755 $(HOSTMON_BIN) $(SBX_HOME)/bin/$(HOSTMON_BIN)
+	install -D -o $(SBX_USER) -g $(SBX_USER) -m 0644 deploy/praxis-hostmon.service \
+		$(SBX_HOME)/.config/systemd/user/praxis-hostmon.service
+	runuser -u $(SBX_USER) -- env XDG_RUNTIME_DIR=/run/user/$$(id -u $(SBX_USER)) \
+		systemctl --user daemon-reload
+	runuser -u $(SBX_USER) -- env XDG_RUNTIME_DIR=/run/user/$$(id -u $(SBX_USER)) \
+		systemctl --user restart praxis-hostmon

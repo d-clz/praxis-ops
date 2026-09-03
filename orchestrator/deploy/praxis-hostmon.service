@@ -9,13 +9,16 @@
 
 [Unit]
 Description=Praxis sandbox host monitor (independent view)
-Documentation=file:///opt/praxis/docs/observability.md
 After=podman.socket
 Wants=podman.socket
 
 [Service]
 Type=simple
-ExecStart=/opt/praxis/bin/hostmon
+# %h, not /opt/praxis: that path never existed on the host (the /opt/praxis
+# under this name is inside the sandbox rootfs image, a completely different
+# filesystem) -- matches the orchestrator's own ~praxis-sbx/bin/orchestrator
+# convention instead of inventing a second one for no reason.
+ExecStart=%h/bin/hostmon
 Restart=always
 RestartSec=5s
 
