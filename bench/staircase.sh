@@ -70,19 +70,26 @@ if [[ -z "$TOKEN" ]]; then
   exit 1
 fi
 
-# $STORAGE lives inside praxis-sbx's own 0700 home. Run as anyone else and
-# `df` on it fails silently (2>/dev/null in storage_free_pct swallows a
-# permission error praxis can't even stat() through -- same "cannot chdir"
-# trap bootstrap/50-verify.sh already works around with as_sbx()), producing
-# an EMPTY reading. That empty string then compares as 0 against
-# STORAGE_MIN_PCT and aborts step 1 immediately with a stop-condition
-# message that has nothing to do with what's actually wrong. A safety check
-# silently producing a false trip is worse than no check -- fail loudly here,
-# before spawning anything, instead.
-if [[ "$(id -un)" != "praxis-sbx" && "$(id -u)" -ne 0 ]]; then
-  echo "ERROR: run as praxis-sbx -- its container storage and cgroup slice live under its own 0700 home, unreadable by any other user. e.g.:" >&2
-  echo "  sudo runuser -u praxis-sbx -- env XDG_RUNTIME_DIR=/run/user/1001 \\" >&2
-  echo "    PRAXIS_API_TOKEN=\"\$TOKEN\" RUNBOOK=$RUNBOOK IMAGE=\"\$IMAGE\" $0" >&2
+# Needs root, not specifically praxis-sbx -- corrected after actually trying
+# praxis-sbx: it can read $STORAGE fine (that part of the original theory
+# was right), but it cannot read ANYTHING under /home/praxis at all, which is
+# where this repo lives -- tickets/<KEY>/scenario.yaml, and $OUT for the
+# results, both of which this script also needs. Being praxis-sbx solves one
+# boundary and immediately hits the other. Nothing here actually touches
+# podman directly, though -- every podman-adjacent thing goes through the
+# orchestrator's HTTP API, which needs no particular identity, just loopback
+# network access -- so there is no requirement to actually assume
+# praxis-sbx's identity at all. Root reads across both 0700 homes the same
+# way bootstrap/50-verify.sh and 60-build-base.sh already do, which is
+# simpler than runuser-ing into praxis-sbx for one file and staying as
+# whoever invoked this for the rest.
+#
+# (Earlier version of this check required praxis-sbx specifically --
+# storage_free_pct() failing silently to empty from praxis was real, but the
+# fix was incomplete: it never confirmed praxis-sbx could read the OTHER
+# things this script needs. It can't.)
+if [[ "$(id -u)" -ne 0 ]]; then
+  echo "ERROR: run as root (sudo $0 ...) -- reads across both praxis's and praxis-sbx's 0700 homes (repo + tickets/, and container storage), same reason every bootstrap/ script needs it" >&2
   exit 1
 fi
 if [[ -z "$IMAGE" ]]; then
