@@ -1,0 +1,151 @@
+groups:
+  - name: praxis-containment
+    interval: 30s
+    rules:
+
+      # --- the two-view reconciliation -----------------------------------
+      # Only view=host can observe this class at all: a container with missing
+      # or corrupt labels never appears in the orchestrator's filtered list.
+      - alert: PraxisUnmanagedContainers
+        expr: praxis_orphans{view="host",kind="unmanaged"} > 0
+        for: 5m
+        labels: {severity: page}
+        annotations:
+          summary: "Container on the podman socket with no praxis labels"
+          description: >
+            {{ $value }} container(s) exist that the reaper cannot see. They will
+            never be reaped and will hold memory and disk until the box is
+            rebuilt. Identify with: curl -s localhost:9102/sessions, then
+            podman ps -a --format '{{"{{"}}.ID{{"}}"}} {{"{{"}}.Labels{{"}}"}}'.
+
+      # Counts diverge without either side reporting a parse failure — the
+      # orchestrator is filtering out containers it should be managing.
+      - alert: PraxisViewDivergence
+        expr: >
+          sum(praxis_sessions_current{view="host"})
+            - sum(praxis_sessions_current{view="orchestrator"}) > 0
+        for: 5m
+        labels: {severity: page}
+        annotations:
+          summary: "Host view sees more sandboxes than the orchestrator does"
+          description: "Label schema drift between spawn and reap paths. Check internal/metrics/labels.go against internal/sandbox."
+
+      # Inverse: orchestrator reports sandboxes the host cannot find. Should be
+      # impossible if both read the same socket; means a stale snapshot.
+      - alert: PraxisPhantomSessions
+        expr: >
+          sum(praxis_sessions_current{view="orchestrator"})
+            - sum(praxis_sessions_current{view="host"}) > 0
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "Orchestrator reports sandboxes absent from the host view"
+
+      - alert: PraxisCollectorStale
+        expr: praxis_snapshot_age_seconds > 120
+        for: 2m
+        labels: {severity: page}
+        annotations:
+          summary: "{{ $labels.view }} snapshot is stale — its counts are fiction"
+
+      - alert: PraxisScrapeError
+        expr: praxis_scrape_error > 0
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.view }} collector cannot list containers"
+
+  - name: praxis-lifecycle
+    interval: 30s
+    rules:
+
+      # TTL reaping is the backstop for the entire design. Nothing else bounds
+      # sandbox lifetime.
+      - alert: PraxisReaperStalled
+        expr: time() - praxis_reaper_last_success_timestamp_seconds > 180
+        for: 1m
+        labels: {severity: page}
+        annotations:
+          summary: "Reaper has not completed a tick in 3 minutes"
+
+      - alert: PraxisUnreapedSessions
+        expr: praxis_oldest_expired_age_seconds{view="host"} > 300
+        for: 2m
+        labels: {severity: page}
+        annotations:
+          summary: "Sandbox {{ $value }}s past its TTL and still running"
+
+      # Leak identity: spawns minus destroys must equal the change in the gauge.
+      # Non-zero means containers appear or vanish outside the accounting.
+      - alert: PraxisLeakIdentityViolated
+        expr: >
+          abs(
+            increase(praxis_spawn_total{result="ok"}[1h])
+              - increase(praxis_destroy_total[1h])
+              - delta(sum(praxis_sessions_current{view="orchestrator"})[1h:])
+          ) > 1
+        for: 15m
+        labels: {severity: warning}
+        annotations:
+          summary: "Spawn/destroy accounting does not close over the last hour"
+
+      - alert: PraxisExitedBacklog
+        expr: praxis_sessions_current{view="orchestrator",state="exited"} > 3
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "Exited sandboxes accumulating — removal is failing, not load"
+
+      # Idempotency key collisions. A spike is the portal retrying against a
+      # live attempt, not a sandbox failure.
+      - alert: PraxisSpawnConflictSpike
+        expr: rate(praxis_spawn_total{result="conflict"}[5m]) > 0.2
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "Portal retry storm against live attempt IDs"
+
+  - name: praxis-capacity
+    interval: 30s
+    rules:
+
+      - alert: PraxisMemoryPressure
+        expr: praxis_slice_memory_pressure_ratio{kind="full"} > 0.10
+        for: 5m
+        labels: {severity: page}
+        annotations:
+          summary: "Sandbox slice stalled on memory >10% of the last minute"
+          description: "Below the benchmarked ceiling this should not occur. Either the mix is heavier than benchmarked or the slice MemoryMax is too low."
+
+      # The loop volume is shared by the image store and every writable layer.
+      # One runaway session denies all of them.
+      - alert: PraxisStorageLow
+        expr: praxis_storage_free_bytes < 5e9
+        for: 5m
+        labels: {severity: page}
+        annotations:
+          summary: "Container storage below 5GB free"
+
+      - alert: PraxisCapacitySaturated
+        expr: praxis_capacity_weight_used / praxis_capacity_weight_limit > 0.9
+        for: 15m
+        labels: {severity: warning}
+        annotations:
+          summary: "Admission near the weight budget — candidates will be rejected mid-assessment"
+
+      # Requires PRAXIS_HOSTMON_STATS=1.
+      - alert: PraxisSessionPidsNearCap
+        expr: praxis_session_pids > 200
+        for: 2m
+        labels: {severity: warning}
+        annotations:
+          summary: "Session {{ $labels.attempt_id }} near the 256 pid cap"
+
+      # Processes in the slice that no container accounts for: leftover conmon,
+      # detached exec, or something that escaped.
+      - alert: PraxisUnaccountedSliceProcs
+        expr: praxis_slice_procs > 0 and sum(praxis_sessions_current{view="host"}) == 0
+        for: 10m
+        labels: {severity: page}
+        annotations:
+          summary: "Processes in the sandbox slice with no containers running"

@@ -1,0 +1,14 @@
+# IDE state -- local to whoever's editing, not project content
+.idea/
+.vscode/
+
+# Go build output -- built by `make build` / `go build`, never committed
+/orchestrator/orchestrator
+/orchestrator/hostmon
+
+# bench/staircase.sh writes timestamped result directories here
+/bench/results/
+
+# OS cruft
+.DS_Store
+Thumbs.db

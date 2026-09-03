@@ -1,0 +1,187 @@
+# Observability — monitoring, orphan reconciliation, capacity benchmark
+
+Scope: what the orchestrator exposes, what the independent host monitor exposes,
+how the two are compared, and how `PRAXIS_MAX_CONCURRENT` stops being a guess.
+
+---
+
+## Assumptions to verify before merging
+
+These were inferred, not read from the codebase. Fix them in
+`internal/metrics/labels.go` if they are wrong — every file here reads from that
+one place.
+
+| Assumption | Where |
+|---|---|
+| Label keys `praxis.attempt_id`, `praxis.runbook`, `praxis.expires_at`, `praxis.spawned_at`, `praxis.weight` | `internal/metrics/labels.go` |
+| `expires_at` / `spawned_at` serialised as RFC3339 | `labels.go:ParseSession` |
+| Docker client is v25 (`types.ContainerListOptions`, `types.Container`) | `collect.go`, `cmd/hostmon` — breaks on v26+, see note at bottom |
+| Sandbox cgroup slice path `/sys/fs/cgroup/user.slice/user-1001.slice/user@1001.service/praxis-sbx.slice` | `PRAXIS_SLICE_PATH` env, hostmon |
+| Spawn API is `POST {base}/v1/sandboxes` with `{"attempt_id","runbook"}` | `bench/staircase.sh`, all paths are env-overridable |
+
+---
+
+## 1. Two-view orphan model
+
+Orphan detection is worthless if it is computed by the thing that creates the
+orphans. So it is measured twice, by two processes that share no runtime state
+and fail independently.
+
+```
+  view=orchestrator                     view=host
+  ─────────────────                     ─────────
+  praxis-orchestrator.service           praxis-hostmon.service
+  lists WITH label filter               lists ALL containers, no filter
+  what the reaper can actually see      ground truth from the socket
+  :9101/metrics                         :9102/metrics
+```
+
+Set algebra, evaluated in Prometheus rather than in either process:
+
+| Set | Meaning | Severity |
+|---|---|---|
+| `H \ O` — on host, not visible to orchestrator | **Unmanaged.** Missing or unparseable labels. The reaper will never touch it. Leaks until the box dies. | page |
+| `O` with `expires_at < now` | **Unreaped.** Reaper sees it and isn't killing it. The backstop has failed. | page |
+| `P \ H` — portal has a live attempt, no container | **Phantom.** OOM-killed or crashed; candidate is staring at a dead terminal. | ticket |
+| slice procs > sum of container pids | **Escaped/leftover.** conmon or exec leftovers not attributable to any container. | page |
+
+The orchestrator cannot report `H \ O` about itself — by construction it cannot
+see those containers. That asymmetry is the whole reason for the second view.
+
+The host monitor must never import `internal/sandbox` or call the orchestrator.
+It reads the socket directly. If the orchestrator is deadlocked, hostmon is
+still the thing that tells you.
+
+---
+
+## 2. Metric reference
+
+Both exporters emit a `praxis_build_info` and a `praxis_scrape_error` so a dead
+collector is distinguishable from a genuine zero.
+
+### Orchestrator — `:9101/metrics`
+
+```
+praxis_sessions_current{view="orchestrator",state="created|running|exited"}
+praxis_sessions_expiring_within{view="orchestrator",window="60s|300s|900s"}
+praxis_sessions_expired_unreaped{view="orchestrator"}
+praxis_oldest_expired_age_seconds{view="orchestrator"}
+praxis_capacity_weight_used{view="orchestrator"}
+praxis_capacity_weight_limit{view="orchestrator"}
+praxis_spawn_total{result="ok|conflict|denied_capacity|error"}
+praxis_destroy_total{reason="ttl|explicit|error"}
+praxis_reaper_last_success_timestamp_seconds
+praxis_reaper_duration_seconds
+praxis_scrape_error{view="orchestrator"}
+```
+
+### Host monitor — `:9102/metrics`
+
+```
+praxis_sessions_current{view="host",state="..."}
+praxis_containers_total{view="host"}              # every container on the socket
+praxis_orphans{view="host",kind="unmanaged|unreaped|unparseable_label"}
+praxis_oldest_expired_age_seconds{view="host"}
+praxis_slice_procs{view="host"}
+praxis_slice_memory_bytes{view="host"}
+praxis_slice_memory_pressure_ratio{view="host",kind="some|full"}
+praxis_storage_free_bytes{view="host"}            # the 24G loop volume
+praxis_session_memory_bytes{...}                  # optional, PRAXIS_HOSTMON_STATS=1
+praxis_session_pids{...}                          # optional
+praxis_scrape_error{view="host"}
+```
+
+**Cardinality.** No metric carries `attempt_id` except the two opt-in
+`praxis_session_*` gauges, which are off by default and bounded by
+`PRAXIS_MAX_CONCURRENT` anyway. Per-session detail for humans lives on
+`/sessions` (JSON), not in the metric namespace.
+
+**Cost.** Both exporters cache. The orchestrator's snapshot is written by the
+reaper tick — one list call serves both reaping and metrics, so scraping adds
+zero socket traffic. Hostmon has its own poll interval (default 15s) and serves
+the last snapshot regardless of scrape rate.
+
+---
+
+## 3. Alerts
+
+In `deploy/alerts.yml`. The three that matter:
+
+- **`PraxisUnmanagedContainers`** — `praxis_orphans{kind="unmanaged"} > 0` for
+  5m. Something created a container outside the orchestrator's accounting.
+- **`PraxisReaperStalled`** — `time() - praxis_reaper_last_success_timestamp_seconds
+  > 3 × interval`. The TTL backstop is the load-bearing element of the design.
+- **`PraxisViewDivergence`** — host count exceeds orchestrator count for 5m.
+  Catches label corruption before it becomes a leak.
+
+Leak-rate identity, asserted continuously:
+
+```
+increase(praxis_spawn_total{result="ok"}[1h])
+  - increase(praxis_destroy_total[1h])
+  - delta(praxis_sessions_current[1h])   ==  0
+```
+
+Non-zero means containers are appearing or vanishing outside the orchestrator's
+knowledge. On a box shared with GitLab that is the failure that quietly eats
+everything.
+
+---
+
+## 4. Capacity benchmark
+
+`bench/staircase.sh`. Replaces `PRAXIS_MAX_CONCURRENT=2` with a measured number.
+
+Method: spawn one weight-unit at a time, hold for `SOAK` seconds, sample, step
+up. Abort on the first stop condition. Report the last step that held.
+
+Stop conditions, checked every 5s:
+
+| Condition | Default | Why |
+|---|---|---|
+| slice memory PSI `full avg60` | > 10% | real pressure, not utilisation |
+| any OOM kill on the box | any | `memory.events` / dmesg |
+| loop volume free | < 20% | writable layers; silent killer |
+| spawn p95 latency | > 20s | admission, not steady state |
+| GitLab health probe | fails | the neighbour's SLO is a stop condition |
+
+Two numbers come out, and they are different limits:
+
+- **Steady-state weight** — how much can be held at once.
+- **Spawn rate** — how fast weight can be added. Image unpack on a loop device
+  is bursty; 6 held is not 6 simultaneous.
+
+Size on measured `memory.current` p95 during an actual solve, **not** on the
+768m limit. The limit is an OOM ceiling; planning against it will
+under-provision by a wide margin.
+
+### Weighted admission
+
+A flat count is the wrong unit — CPT-01 (systemd + nginx + three faults) is
+several times SKN-01 (files and grep). Put `weight` in the Runbook, stamp it
+onto `praxis.weight`, and have admission compare summed weight against
+`PRAXIS_CAPACITY_WEIGHT`. Benchmark against the worst-case mix, not the average.
+
+### Blast radius
+
+Independent of the benchmark: every sandbox belongs to `praxis-sbx.slice` with
+its own `MemoryMax`. Without it, overcommit hands the choice to the kernel OOM
+killer, which scores GitLab at 6G as a far better victim than a 768m sandbox.
+
+### Rate, from concurrency
+
+```
+concurrent = arrivals_per_min × mean_session_minutes
+```
+
+Hold 6 with a 25-minute mean solve → ~14 candidates/hour. Plan at ~70% of it;
+arrivals are not smooth and the rejection is visible to a candidate mid-assessment.
+
+---
+
+## Note on the docker client version
+
+Every list call here uses the v25 surface (`types.ContainerListOptions`,
+`[]types.Container`). If `go mod tidy` resolves to v26+, these move to
+`container.ListOptions` and `container.Summary` — same fields, different import.
+That is the same break flagged for the orchestrator itself; fix both together.

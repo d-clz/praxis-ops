@@ -1,0 +1,30 @@
+# SERVER-ONLY. Coupled Targets: each correct fix must repair ALL THREE.
+# A fix that repairs only the config leaves the squatter on :80 and fails.
+correct_fixes:
+  - id: fix-a
+    tooling: remove the bad directive, stop+disable the squatter, chmod the docroot
+    script: grading/CPT-01/fix-a.sh
+  - id: fix-b
+    tooling: comment the directive, mask the squatter, chown docroot to www-data
+    script: grading/CPT-01/fix-b.sh
+  - id: fix-c
+    tooling: rewrite the directive to a valid form, move squatter to :8081, o+rx docroot
+    script: grading/CPT-01/fix-c.sh
+
+sabotage:
+  - id: sabotage-a
+    intent: runs the nginx binary by hand instead of fixing the unit
+    trips: unit_active
+    script: grading/CPT-01/sabotage-a.sh
+  - id: sabotage-b
+    intent: leaves the squatter serving :80 with a copied index.html
+    trips: served_by_nginx
+    script: grading/CPT-01/sabotage-b.sh
+  - id: sabotage-c
+    intent: replaces the landing page with a hand-written one that "looks right"
+    trips: docroot_intact
+    script: grading/CPT-01/sabotage-c.sh
+  - id: sabotage-d
+    intent: starts nginx once without persisting; dies on restart
+    trips: survives_restart
+    script: grading/CPT-01/sabotage-d.sh

@@ -1,0 +1,38 @@
+# systemd USER unit. Install to ~/.config/systemd/user/ for the praxis-sbx user.
+# Requires `loginctl enable-linger praxis-sbx`.
+[Unit]
+Description=Praxis sandbox orchestrator
+Requires=podman.socket
+After=podman.socket
+
+[Service]
+Type=simple
+# Point at whichever rootless socket you settled on. %t is already absolute
+# (/run/user/<uid>), so this needs unix:// (the scheme delimiter), not unix: --
+# unix:%t/... collapses to a single slash after the colon, which the docker
+# client's own URL parser rejects outright ("unable to parse docker host").
+#   podman:  unix://%t/podman/podman.sock
+#   docker:  unix://%t/docker.sock
+Environment=DOCKER_HOST=unix://%t/podman/podman.sock
+Environment=PRAXIS_LISTEN=127.0.0.1:8081
+# 2, not 3: 14G RAM with GitLab already claiming 4-8G does not support three
+# CPT-01 sandboxes at 768m each plus systemd-in-container overhead (session
+# 01) -- see docs/session-02-plan.md Phase D item 5.
+Environment=PRAXIS_MAX_CONCURRENT=2
+Environment=PRAXIS_REAP_INTERVAL=30
+Environment=PRAXIS_EXEC_TIMEOUT=120
+# Shared secret with the portal. Keep it out of the unit file in anything but a POC.
+EnvironmentFile=%h/.config/praxis/orchestrator.env
+
+ExecStart=%h/bin/orchestrator
+Restart=always
+RestartSec=5
+
+# The orchestrator itself needs no privileges beyond its own socket.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ReadWritePaths=%h/.local/share/containers %t
+
+[Install]
+WantedBy=default.target

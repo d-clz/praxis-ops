@@ -1,0 +1,64 @@
+# CPT-01 -- Ops substrate, star 4. Layered service repair. Requires systemd.
+id: CPT-01
+substrate_class: ops
+substrate_image: registry.local/praxis/ops-systemd@sha256:REPLACE_AT_BAKE
+family: service-repair
+star: 4
+delivery: live_sandbox
+
+difficulty:
+  vague: high
+  targets: 3
+  decoys: 2
+
+runtime:
+  # systemd as PID 1. Under rootless podman this stays unprivileged: cgroup v2
+  # delegation plus a writable /run, never --privileged.
+  systemd: true
+  root_in_sandbox: true
+  network: none
+  memory: 768m
+  cpus: "1.0"
+  pids_limit: 384
+  ttl_seconds: 3600
+  read_only: false
+
+detect:
+  - nginx is active under systemd, not run by hand
+  - the site answers on port 80 with the provisioned content
+  - the unit survives an explicit restart
+  - the original document root content is unmodified
+
+title: "Cape Town: borked nginx"
+
+brief: |
+  ## Summary
+  A colleague was "tidying up" this host and left before the handover. The web
+  service has not answered since. There is more than one thing wrong.
+
+  ## Industrial pattern
+  Layered misconfiguration -- each repair reveals the next fault, and a partial fix
+  produces a service that starts once and dies on the next restart.
+
+  ## Service flow
+  systemd unit -> nginx config parse -> listen socket bind -> document root read
+
+  ## Reproduce
+  1. Open a shell in the sandbox as root.
+  2. `curl -sS localhost:80` -- connection fails.
+  3. `systemctl status nginx`.
+
+  ## Observables
+  Nothing serves on port 80. `systemctl` reports the unit is not running. Journal
+  entries for the unit are the place to start.
+
+  ## Expected
+  A working host answers `curl -s localhost:80` with the provisioned landing page,
+  served by nginx under systemd, and keeps answering after `systemctl restart nginx`.
+
+  ## Definition of Done
+  1. `systemctl is-active nginx` reports active.
+  2. `curl -s localhost:80` returns the provisioned landing page.
+  3. The service survives `systemctl restart nginx`.
+  4. The landing page content is the one that was already on this host. Do not
+     rewrite it, and do not serve it from somewhere else.

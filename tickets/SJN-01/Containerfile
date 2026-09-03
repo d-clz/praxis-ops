@@ -1,0 +1,12 @@
+# syntax=docker/dockerfile:1
+FROM registry.local/praxis/ops-base@sha256:REPLACE_AT_BAKE
+
+COPY seed.sh /tmp/seed.sh
+COPY entrypoint.sh /opt/praxis/entrypoint.sh
+RUN /bin/bash /tmp/seed.sh && rm -f /tmp/seed.sh && chmod 0755 /opt/praxis/entrypoint.sh
+
+# Root inside the sandbox is required (the candidate must inspect /proc and kill a
+# process they do not own). Under rootless podman this root is namespaced.
+USER root
+WORKDIR /root
+CMD ["/opt/praxis/entrypoint.sh"]

@@ -1,0 +1,11 @@
+# syntax=docker/dockerfile:1
+FROM registry.local/praxis/ops-base@sha256:REPLACE_AT_BAKE
+
+# seed.sh runs at BUILD time. The seeded state is baked into the image so every
+# spawn is byte-identical and the fault cannot drift.
+COPY seed.sh /tmp/seed.sh
+RUN /bin/bash /tmp/seed.sh && rm -f /tmp/seed.sh
+
+USER candidate
+WORKDIR /home/candidate
+CMD ["/bin/sh","-c","sleep infinity"]

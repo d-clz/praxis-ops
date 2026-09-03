@@ -1,0 +1,8 @@
+# syntax=docker/dockerfile:1
+FROM registry.local/praxis/ops-systemd@sha256:REPLACE_AT_BAKE
+
+COPY seed.sh /tmp/seed.sh
+RUN /bin/bash /tmp/seed.sh && rm -f /tmp/seed.sh
+
+STOPSIGNAL SIGRTMIN+3
+CMD ["/sbin/init"]

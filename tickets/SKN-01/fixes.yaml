@@ -1,0 +1,28 @@
+# SERVER-ONLY. Never shipped to candidates.
+# Three remediation paths using different tooling. If all three used awk, the
+# ticket would test recall of one command rather than troubleshooting.
+correct_fixes:
+  - id: fix-a
+    tooling: awk single pass
+    script: grading/SKN-01/fix-a.sh
+  - id: fix-b
+    tooling: grep + cut + sort -u pipeline
+    script: grading/SKN-01/fix-b.sh
+  - id: fix-c
+    tooling: python3 stdlib
+    script: grading/SKN-01/fix-c.sh
+
+# Authored BEFORE check.sh. Each must trip a named assertion.
+sabotage:
+  - id: sabotage-a
+    intent: filters the log in place to make counting easier (destroys evidence)
+    trips: log_intact
+    script: grading/SKN-01/sabotage-a.sh
+  - id: sabotage-b
+    intent: counts every 5xx in the file, ignoring the hour window
+    trips: answer_correct
+    script: grading/SKN-01/sabotage-b.sh
+  - id: sabotage-c
+    intent: counts request lines rather than distinct clients
+    trips: answer_correct
+    script: grading/SKN-01/sabotage-c.sh

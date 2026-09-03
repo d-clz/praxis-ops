@@ -1,0 +1,49 @@
+# SKN-01 -- Ops substrate, star 2. Data extraction at scale.
+# Candidate-safe: this file may be rendered in the portal.
+id: SKN-01
+substrate_class: ops
+substrate_image: registry.local/praxis/ops-base@sha256:REPLACE_AT_BAKE
+family: log-forensics
+star: 2
+delivery: live_sandbox
+
+difficulty:
+  vague: low
+  targets: 1
+  decoys: 1
+
+runtime:
+  systemd: false
+  root_in_sandbox: false
+  network: none
+  memory: 512m
+  cpus: "1.0"
+  pids_limit: 128
+  ttl_seconds: 2700
+  read_only: false
+
+detect:
+  - answer.txt holds the count of distinct client IPs that received a 5xx
+    response between 03:00:00 and 03:59:59 UTC on 2026-04-11
+  - the source log is byte-identical to the state it was provisioned in
+
+title: "Saskatoon: the 3am error window"
+
+brief: |
+  ## Summary
+  A customer reports a burst of failures early on 11 April. Ops captured the edge
+  access log before rotation. Leadership wants one number: how many distinct
+  clients were affected during the worst hour.
+
+  ## Reproduce
+  1. Open a shell in the sandbox as `candidate`.
+  2. The captured log is at `/var/log/edge/access.log`.
+  3. It is large. Loading it into an editor will not end well.
+
+  ## Observables
+  The log is combined format. A 5xx is any status in 500-599. Timestamps are UTC.
+
+  ## Definition of Done
+  1. Write the count -- digits only -- to `/home/candidate/answer.txt`.
+  2. Leave `/var/log/edge/access.log` exactly as you found it. Other teams still
+     need it; it is evidence, not scratch space.

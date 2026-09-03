@@ -1,0 +1,8 @@
+# Every script here runs on the Linux host, never on whatever machine edited
+# it. A CRLF shebang line is a silent "bad interpreter" failure at exec time,
+# not a diff-noise annoyance -- force LF regardless of any given clone's own
+# core.autocrlf setting.
+*.sh text eol=lf
+*.service text eol=lf
+Makefile text eol=lf
+*.go text eol=lf

@@ -1,0 +1,42 @@
+# ~/.config/systemd/user/praxis-hostmon.service  (user praxis-sbx, uid 1001)
+#
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now praxis-hostmon
+#
+# Deliberately NOT Requires= or After= the orchestrator. The whole value of this
+# process is that it keeps reporting when the orchestrator is wedged, so it must
+# not share a failure domain with it. It depends only on the socket.
+
+[Unit]
+Description=Praxis sandbox host monitor (independent view)
+Documentation=file:///opt/praxis/docs/observability.md
+After=podman.socket
+Wants=podman.socket
+
+[Service]
+Type=simple
+ExecStart=/opt/praxis/bin/hostmon
+Restart=always
+RestartSec=5s
+
+Environment=PRAXIS_HOSTMON_LISTEN=127.0.0.1:9102
+Environment=DOCKER_HOST=unix:///run/user/1001/podman/podman.sock
+Environment=PRAXIS_HOSTMON_INTERVAL=15s
+Environment=PRAXIS_SLICE_PATH=/sys/fs/cgroup/user.slice/user-1001.slice/user@1001.service/praxis-sbx.slice
+Environment=PRAXIS_STORAGE_PATH=/home/praxis-sbx/.local/share/containers
+# Per-session stats cost one API call per running container per poll.
+# Turn on for benchmarking, off for steady state.
+Environment=PRAXIS_HOSTMON_STATS=0
+
+# It reads the socket and cgroupfs. It never writes anything.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadOnlyPaths=/sys/fs/cgroup
+RestrictAddressFamilies=AF_UNIX AF_INET
+MemoryMax=128M
+TasksMax=32
+
+[Install]
+WantedBy=default.target

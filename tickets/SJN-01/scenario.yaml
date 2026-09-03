@@ -1,0 +1,58 @@
+# SJN-01 -- Ops substrate, star 3. Discovery: find the actor.
+id: SJN-01
+substrate_class: ops
+substrate_image: registry.local/praxis/ops-base@sha256:REPLACE_AT_BAKE
+family: process-forensics
+star: 3
+delivery: live_sandbox
+
+difficulty:
+  vague: medium
+  targets: 1
+  decoys: 2
+
+runtime:
+  systemd: false
+  root_in_sandbox: true
+  network: none
+  memory: 512m
+  cpus: "1.0"
+  pids_limit: 256
+  ttl_seconds: 3600
+  read_only: false
+
+detect:
+  - the process appending to /var/log/app/service.log is no longer running
+  - the log file has stopped growing
+  - the log file and its pre-existing contents still exist
+  - the unrelated monitoring reader is still running
+
+title: "Saint John: something is filling the disk"
+
+brief: |
+  ## Summary
+  Disk on this host is climbing steadily and paging is imminent. One log file is
+  responsible. Nobody on the team owns it and the obvious candidates come back
+  clean.
+
+  ## Industrial pattern
+  Unsupervised writer with no rotation policy -- an orphaned process outliving the
+  deployment that spawned it.
+
+  ## Service flow
+  something -> open(2) on a log path -> append loop -> no rotation -> disk pressure
+
+  ## Reproduce
+  1. Open a shell in the sandbox.
+  2. `df -h /` and `du -sh /var/log/app`.
+  3. Wait ten seconds. Measure again.
+
+  ## Observables
+  `/var/log/app/service.log` grows continuously. Nothing in the usual service
+  inventory admits to writing it.
+
+  ## Definition of Done
+  1. Stop the growth at its source. The writing process must no longer be running.
+  2. Do not delete, truncate, rotate or freeze the log. It is evidence -- the team
+     needs its existing contents to work out how long this has been happening.
+  3. Do not disturb unrelated processes. Other things on this host are load bearing.
