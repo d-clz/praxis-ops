@@ -1,0 +1,34 @@
+# ~/.config/systemd/user/praxis-sbx.slice  (user praxis-sbx, uid 1001)
+#
+#   systemctl --user daemon-reload
+#   systemctl --user start praxis-sbx.slice
+#   systemctl --user enable praxis-sbx.slice   # persist across reboots
+#
+# Every sandbox container's cgroup nests here (internal/sandbox/container.go's
+# spec() sets HostConfig.CgroupParent to this slice's name). Installed as its
+# own persistent unit, not passed as an ad-hoc --cgroup-parent string on each
+# spawn: a cgroup-parent that only exists transiently, created and torn down
+# by whatever container happens to reference it, disappears the moment the
+# last sandbox exits -- which would just relocate the "PRAXIS_SLICE_PATH
+# doesn't exist" problem hostmon's silent-zero fix (cmd/hostmon/main.go)
+# already caught, from "always missing" to "missing whenever the box is
+# idle". Idle is the most common state to actually be reading these metrics
+# in. A real unit exists (and this path is readable) whether zero containers
+# or several are running under it.
+#
+# PRAXIS_SLICE_PATH in praxis-hostmon.service already assumed exactly this
+# path -- /sys/fs/cgroup/user.slice/user-1001.slice/user@1001.service/
+# praxis-sbx.slice -- before this unit existed to back it; this closes that
+# gap, it doesn't change the assumption.
+
+[Unit]
+Description=Praxis sandbox slice -- every spawned container's cgroup nests here
+Before=slices.target
+
+[Slice]
+# No resource ceiling set here on purpose, for this POC. Per-container limits
+# already come from the Runbook (memory, pids_limit) via container.go's
+# spec(); a slice-wide MemoryMax/TasksMax here would be a SECOND ceiling to
+# keep in sync with PRAXIS_CAPACITY_WEIGHT by hand, and this unit exists to
+# give hostmon a stable place to read from -- not to be a second admission
+# control.

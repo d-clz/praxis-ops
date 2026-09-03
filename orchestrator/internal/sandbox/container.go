@@ -350,6 +350,22 @@ func (b *ContainerBackend) spec(rb Runbook, attemptID string, spawnedAt, expires
 			Memory:    parseMemory(rb.Memory),
 			NanoCPUs:  int64(rb.CPUs * 1e9),
 			PidsLimit: &rb.PidsLimit,
+			// CgroupParent lives on Resources, not HostConfig directly --
+			// easy to miss, the compiler will reject it at the top level of
+			// the HostConfig literal with "unknown field" if it's ever moved.
+			//
+			// Requires deploy/praxis-sbx.slice installed and started on the
+			// host -- see SandboxSlice's own comment. What happens here if
+			// that unit is NOT installed is genuinely unverified: systemd's
+			// transient-unit API often auto-vivifies an intermediate slice
+			// path on demand, in which case this degrades to "hostmon has
+			// nothing pre-existing to read yet" rather than a spawn failure
+			// -- but that is an assumption, not something confirmed against
+			// this host's actual systemd/podman versions. Deploy
+			// deploy/praxis-sbx.slice BEFORE this ships, and confirm a spawn
+			// still succeeds if it's ever missing, rather than trusting this
+			// comment.
+			CgroupParent: SandboxSlice,
 		},
 		SecurityOpt: []string{"no-new-privileges"},
 		CapDrop:     []string{"ALL"},

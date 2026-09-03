@@ -30,6 +30,16 @@ const (
 
 	ManagedValue = "praxis-orchestrator"
 	NamePrefix   = "sbx-"
+
+	// SandboxSlice is the persistent systemd slice every sandbox's cgroup
+	// nests under (container.go's spec() sets HostConfig.CgroupParent to
+	// this). Must match the [Slice] unit name in deploy/praxis-sbx.slice --
+	// that unit exists specifically so hostmon's PRAXIS_SLICE_PATH resolves
+	// to a real, always-present path (a bare --cgroup-parent string with no
+	// backing unit would vanish with the last container using it, moving the
+	// "path doesn't exist" problem to precisely the idle state hostmon is
+	// most often read during).
+	SandboxSlice = "praxis-sbx.slice"
 )
 
 var (

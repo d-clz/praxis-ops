@@ -45,6 +45,19 @@ sudo chmod 0600 ~praxis-sbx/.config/praxis/orchestrator.env
 
 sudo loginctl enable-linger praxis-sbx   # if 20-spawnbox-user.sh hasn't already
 
+# Every spawned container's cgroup nests under this slice
+# (internal/sandbox/backend.go's SandboxSlice, set via container.go's
+# spec()). Install and start it BEFORE the orchestrator ever spawns
+# anything -- what happens if a container references a cgroup parent that
+# was never installed is genuinely unverified (see container.go's own
+# comment on CgroupParent), so don't rely on finding out.
+sudo install -D -o praxis-sbx -g praxis-sbx -m 0644 \
+  deploy/praxis-sbx.slice ~praxis-sbx/.config/systemd/user/praxis-sbx.slice
+sudo runuser -u praxis-sbx -- env XDG_RUNTIME_DIR=/run/user/"$(id -u praxis-sbx)" \
+  systemctl --user daemon-reload
+sudo runuser -u praxis-sbx -- env XDG_RUNTIME_DIR=/run/user/"$(id -u praxis-sbx)" \
+  systemctl --user enable --now praxis-sbx.slice
+
 sudo make deploy                         # installs the .service file too, first time
 sudo runuser -u praxis-sbx -- env XDG_RUNTIME_DIR=/run/user/"$(id -u praxis-sbx)" \
   systemctl --user enable praxis-orchestrator
