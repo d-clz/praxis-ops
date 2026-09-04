@@ -144,7 +144,7 @@ Stop conditions, checked every 5s:
 | any OOM kill on the box | any | `memory.events` / dmesg |
 | loop volume free | < 20% | writable layers; silent killer |
 | spawn p95 latency | > 20s | admission, not steady state |
-| GitLab health probe | fails | the neighbour's SLO is a stop condition |
+| neighbour health probe | fails | the neighbour's SLO is a stop condition |
 
 Two numbers come out, and they are different limits:
 

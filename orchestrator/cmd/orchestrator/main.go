@@ -40,11 +40,11 @@ func main() {
 	reapEvery := time.Duration(envInt("PRAXIS_REAP_INTERVAL", 30)) * time.Second
 	// Weight, not a flat container count: PRAXIS_MAX_CONCURRENT is retired.
 	// Every current ticket (SJN-01/SKN-01/CPT-01) leaves Runbook.Weight unset,
-	// which EffectiveWeight() treats as 1 -- so a weight budget of 2 behaves
-	// identically to max_concurrent=2 today. The default here matches that
-	// same value on purpose, for the same RAM-budget reason
-	// docs/session-02-plan.md Phase D item 5 already established.
-	capacityWeight := envInt("PRAXIS_CAPACITY_WEIGHT", 2)
+	// which EffectiveWeight() treats as 1 -- so this is a flat concurrent
+	// count until a ticket sets a real weight. 11 = ~70% of the measured
+	// SJN-01 staircase steady-state (docs/capacity-benchmark.md,
+	// 2026-09-03); matches the deploy unit's default on purpose.
+	capacityWeight := envInt("PRAXIS_CAPACITY_WEIGHT", 11)
 	execTimeout := time.Duration(envInt("PRAXIS_EXEC_TIMEOUT", 120)) * time.Second
 
 	backend, err := sandbox.NewContainerBackend()
