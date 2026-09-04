@@ -53,6 +53,26 @@ into `main` closes this phase.
   Also measures idle-hold cost only, not an active candidate's real load.
   Re-benchmark before treating 11 as more than a reasonable starting
   point — see `docs/capacity-benchmark.md` for what would change it.
+- **No destroy reason survives past the container itself.** Confirmed by
+  reading `internal/api/server.go`'s `get()`: it returns a flat `404 {"error":
+  "no such instance"}` whether the attempt_id never existed, expired on TTL,
+  just tripped the new disk cap (`praxis.disk-limit-bytes`), or was explicitly
+  destroyed. The only place a reason exists at all is a log line and
+  `praxis_destroy_total{reason=...}` — a global counter, not a per-attempt
+  record. This is consistent with the orchestrator's deliberate statelessness
+  ("if the portal loses an attempt record, the container still dies on
+  schedule" — `cmd/orchestrator/main.go`'s reaper comment) but it means a
+  future portal cannot tell a candidate *why* their session is gone: TTL
+  expiry, disk abuse, and a plain typo'd attempt_id are indistinguishable.
+  Sketch for later, not built: a short-lived, explicitly-expiring in-memory
+  tombstone map (`attempt_id -> {reason, destroyed_at}`, a few minutes'
+  window) that `get()` checks before falling through to "no such instance,"
+  returning `410 Gone` with the reason instead when a tombstone is still
+  live. Deliberately NOT a persistent event log — that would be new state
+  the orchestrator has to carry, the opposite of the statelessness the
+  reaper's whole design leans on; a bounded, in-memory, best-effort map
+  degrades safely back to today's behavior on restart rather than becoming
+  another thing that can disagree with reality.
 
 ## Next milestones
 
