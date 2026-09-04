@@ -62,8 +62,20 @@ fi
 # is missing, not because the capability is absent. Report that as SKIP, not
 # PASS -- an untested property is not a held one.
 if command -v capsh >/dev/null 2>&1; then
-  check "caps.no_sys_module" blocked sh -c 'capsh --print | grep -q cap_sys_module'
-  check "caps.no_sys_ptrace" blocked sh -c 'capsh --print | grep -q cap_sys_ptrace'
+  # Target the "Bounding set" line specifically, not capsh --print's whole
+  # output. Found via a real run against praxis/ops-systemd: a newer
+  # libcap2-bin than whatever was on the host when ops-base last passed this
+  # clean prints an additional "Current IAB:" summary line that lists EVERY
+  # capability, prefixed with "!" for the ones actually absent -- e.g.
+  # "...,!cap_sys_module,...". A bare `grep -q cap_sys_module` matches that
+  # line on substring alone regardless of the "!", so it false-FAILs a
+  # container that has zero capabilities (Bounding set genuinely empty,
+  # confirmed by hand against the real output). Bounding set is also the
+  # actually-correct thing to check: it is what governs whether the
+  # capability could ever become available at all, which is what
+  # caps.no_sys_module/no_sys_ptrace are trying to answer in the first place.
+  check "caps.no_sys_module" blocked sh -c "capsh --print | awk -F'=' '/^Bounding set/{print \$2}' | grep -qw cap_sys_module"
+  check "caps.no_sys_ptrace" blocked sh -c "capsh --print | awk -F'=' '/^Bounding set/{print \$2}' | grep -qw cap_sys_ptrace"
 else
   skip "caps.no_sys_module" "capsh not installed -- property untested"
   skip "caps.no_sys_ptrace" "capsh not installed -- property untested"
