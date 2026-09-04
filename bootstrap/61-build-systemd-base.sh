@@ -113,7 +113,14 @@ trap restore_wgetrc EXIT
 { [[ -f /etc/wgetrc ]] && cat /etc/wgetrc; echo "inet4-only = on"; } > /etc/wgetrc.praxis-tmp
 mv /etc/wgetrc.praxis-tmp /etc/wgetrc
 
-debootstrap --arch="$ARCH" --variant=minbase --include="$PKGS" \
+# --components=main,universe: nginx-light (like nginx-full/nginx-extras) is
+# a universe package, not main -- confirmed via packages.ubuntu.com and this
+# host's own `apt-cache madison nginx-light` output (.../universe). debootstrap
+# defaults to main only; without this it fetches InRelease/Packages fine and
+# then fails at the very end with "Couldn't find these debs: nginx-light",
+# which reads like a typo, not a missing component. ops-base's own package
+# list never hit this -- everything on it happens to live in main.
+debootstrap --arch="$ARCH" --variant=minbase --components=main,universe --include="$PKGS" \
   --cache-dir="$CACHE_DIR" \
   "$RELEASE" "$ROOTFS" "$MIRROR"
 
