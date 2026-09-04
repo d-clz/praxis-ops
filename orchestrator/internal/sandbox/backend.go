@@ -28,6 +28,12 @@ const (
 	LabelSpawnedAt = "praxis.spawned-at"
 	LabelWeight    = "praxis.weight"
 
+	// LabelDiskLimit stamps the container's writable-layer cap in bytes.
+	// Enforced by the reaper alongside TTL -- see reapTick in cmd/orchestrator
+	// and Runbook.EffectiveDiskLimitBytes' comment for why every container
+	// gets one of these regardless of whether the caller set DiskLimit.
+	LabelDiskLimit = "praxis.disk-limit-bytes"
+
 	ManagedValue = "praxis-orchestrator"
 	NamePrefix   = "sbx-"
 

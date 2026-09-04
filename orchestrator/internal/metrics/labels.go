@@ -21,6 +21,7 @@ const (
 	LabelExpiresAt = sandbox.LabelExpires
 	LabelSpawnedAt = sandbox.LabelSpawnedAt
 	LabelWeight    = sandbox.LabelWeight
+	LabelDiskLimit = sandbox.LabelDiskLimit
 )
 
 // TimeFormat is the serialisation assumed for the two timestamp labels.
@@ -37,6 +38,22 @@ type Session struct {
 	SpawnedAt   time.Time
 	ExpiresAt   time.Time
 	Weight      int
+
+	// DiskLimitBytes and DiskUsedBytes are only meaningful when the caller
+	// requested container.ListOptions.Size -- CollectManaged does, CollectAll
+	// (hostmon) does not, since hostmon enforces nothing and the size walk
+	// costs real time per container. DiskUsedBytes is 0, not "confirmed
+	// empty", when size wasn't requested -- callers reading this from a
+	// CollectAll snapshot should not treat 0 as a real measurement.
+	DiskLimitBytes int64
+	DiskUsedBytes  int64
+}
+
+// OverDiskLimit reports whether a measured writable-layer size has exceeded
+// this session's stamped cap. False whenever either side is unknown (0) --
+// callers must have collected with Size requested for this to mean anything.
+func (s Session) OverDiskLimit() bool {
+	return s.DiskLimitBytes > 0 && s.DiskUsedBytes > s.DiskLimitBytes
 }
 
 // Expired reports whether the TTL has passed. The reaper's own clock is the
@@ -111,6 +128,16 @@ func ParseSession(id, state string, labels map[string]string) (Session, OrphanKi
 			s.Weight = w
 		}
 	}
+
+	if raw, ok := labels[LabelDiskLimit]; ok {
+		if n, err := strconv.ParseInt(raw, 10, 64); err == nil && n > 0 {
+			s.DiskLimitBytes = n
+		}
+	}
+
+	// DiskUsedBytes is NOT set here -- it comes from the list call's per-item
+	// SizeRw, not from a label, and only when the caller requested it (see
+	// collect()). The caller fills it in after ParseSession succeeds.
 
 	return s, "", true
 }

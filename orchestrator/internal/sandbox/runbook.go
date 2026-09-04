@@ -53,6 +53,14 @@ type Runbook struct {
 	// Immutability here comes from "destroy and respawn from a pinned digest",
 	// not from a frozen rootfs. Keep it true only for batch grader containers.
 	ReadOnly bool `yaml:"read_only" json:"read_only"`
+
+	// DiskLimit caps the container's writable overlay layer, parsed the same
+	// way as Memory (parseMemory in container.go). Nothing enforced this
+	// before -- root_in_sandbox tickets like SJN-01/CPT-01 could write to the
+	// writable layer without limit, bounded only by ttl_seconds and whatever
+	// was left of real host disk. Empty/unparseable does NOT mean "no cap":
+	// see EffectiveDiskLimitBytes, same reasoning as EffectiveWeight.
+	DiskLimit string `yaml:"disk_limit" json:"disk_limit,omitempty"`
 }
 
 // scenarioFile is the subset of tickets/<KEY>/scenario.yaml the orchestrator
@@ -74,6 +82,7 @@ func DefaultRunbook() Runbook {
 		Workdir:       "/home/candidate",
 		Tmpfs:         map[string]string{"/tmp": "size=64m"},
 		Weight:        1,
+		DiskLimit:     "512m",
 	}
 }
 
@@ -139,4 +148,27 @@ func (r Runbook) EffectiveWeight() int {
 		return 1
 	}
 	return r.Weight
+}
+
+// defaultDiskLimitBytes backstops every caller that skips DiskLimit
+// entirely, not just ones that go through DefaultRunbook(). POST /instances
+// decodes createReq.Runbook straight from the request body with zero
+// defaults applied (see internal/api/server.go's create) -- the exact same
+// gap EffectiveWeight already closes for Weight. Without this, a hand-built
+// Runbook JSON (bench/staircase.sh, a bare curl call) would spawn with no
+// disk cap at all, silently reintroducing the problem this field exists to
+// close.
+const defaultDiskLimitBytes = 512 << 20 // 512m
+
+// EffectiveDiskLimitBytes is DiskLimit parsed and defaulted the same way
+// EffectiveWeight defaults Weight: empty or unparseable means "not
+// specified", not "unlimited". container.go's parseMemory returns 0 on
+// either an empty string or a string it can't parse -- both cases fall
+// through to the default here rather than stamping a real, enforceable
+// "0 bytes" cap that would destroy the container immediately.
+func (r Runbook) EffectiveDiskLimitBytes() int64 {
+	if n := parseMemory(r.DiskLimit); n > 0 {
+		return n
+	}
+	return defaultDiskLimitBytes
 }

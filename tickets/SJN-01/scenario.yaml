@@ -16,6 +16,7 @@ runtime:
   root_in_sandbox: true
   network: none
   memory: 512m
+  disk_limit: 256m
   cpus: "1.0"
   pids_limit: 256
   ttl_seconds: 3600

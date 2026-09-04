@@ -141,17 +141,30 @@ func reapTick(ctx context.Context, b sandbox.Backend, lister metrics.Lister, reg
 	now := time.Now()
 	var killed []string
 	for _, sess := range snap.Sessions {
-		if !sess.Expired(now) {
+		reason := ""
+		switch {
+		case sess.Expired(now):
+			reason = "ttl"
+		case sess.OverDiskLimit():
+			// Checked every tick, same cadence as TTL -- not a soft warning.
+			// root_in_sandbox tickets (SJN-01, CPT-01) had nothing stopping a
+			// candidate writing past any sane size before this existed; see
+			// Runbook.EffectiveDiskLimitBytes and Session.OverDiskLimit.
+			reason = "disk_limit"
+			log.Warn("sandbox over its disk limit, destroying",
+				"attempt_id", sess.AttemptID, "used_bytes", sess.DiskUsedBytes,
+				"limit_bytes", sess.DiskLimitBytes)
+		default:
 			continue
 		}
 		ok, err := b.Destroy(ctx, sess.AttemptID)
 		if err != nil {
 			reg.IncDestroy("error")
-			log.Error("reap destroy failed", "attempt_id", sess.AttemptID, "err", err)
+			log.Error("reap destroy failed", "attempt_id", sess.AttemptID, "reason", reason, "err", err)
 			continue
 		}
 		if ok {
-			reg.IncDestroy("ttl")
+			reg.IncDestroy(reason)
 			killed = append(killed, sess.AttemptID)
 		}
 	}

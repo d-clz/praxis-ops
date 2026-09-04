@@ -90,7 +90,7 @@ func (r *Registry) IncSpawn(result string) {
 	r.mu.Unlock()
 }
 
-// IncDestroy reason is one of: ttl, explicit, error.
+// IncDestroy reason is one of: ttl, disk_limit, explicit, error.
 func (r *Registry) IncDestroy(reason string) {
 	r.mu.Lock()
 	r.destroy[reason]++

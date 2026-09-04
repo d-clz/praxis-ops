@@ -139,6 +139,7 @@ yaml_val() { # $1=key $2=default -> trimmed, unquoted value, or the default
 RUNTIME_BLOCK="$(runtime_block)"
 RB_NETWORK="$(yaml_val network none)"
 RB_MEMORY="$(yaml_val memory 512m)"
+RB_DISK_LIMIT="$(yaml_val disk_limit 512m)"
 RB_CPUS="$(yaml_val cpus 1.0)"
 RB_PIDS="$(yaml_val pids_limit 256)"
 RB_TTL="$(yaml_val ttl_seconds 3600)"
@@ -150,11 +151,11 @@ RB_WORKDIR="$(yaml_val workdir /home/candidate)"
 # having to remember this script also needs editing.
 RB_WEIGHT="$(yaml_val weight 1)"
 
-log "ticket=$RUNBOOK image=$IMAGE network=$RB_NETWORK memory=$RB_MEMORY cpus=$RB_CPUS pids_limit=$RB_PIDS ttl_seconds=$RB_TTL systemd=$RB_SYSTEMD weight=$RB_WEIGHT"
+log "ticket=$RUNBOOK image=$IMAGE network=$RB_NETWORK memory=$RB_MEMORY disk_limit=$RB_DISK_LIMIT cpus=$RB_CPUS pids_limit=$RB_PIDS ttl_seconds=$RB_TTL systemd=$RB_SYSTEMD weight=$RB_WEIGHT"
 
 runbook_json() {
-  printf '{"image":%s,"network":%s,"memory":%s,"cpus":%s,"pids_limit":%s,"ttl_seconds":%s,"systemd":%s,"workdir":%s,"weight":%s}' \
-    "$(json_str "$IMAGE")" "$(json_str "$RB_NETWORK")" "$(json_str "$RB_MEMORY")" \
+  printf '{"image":%s,"network":%s,"memory":%s,"disk_limit":%s,"cpus":%s,"pids_limit":%s,"ttl_seconds":%s,"systemd":%s,"workdir":%s,"weight":%s}' \
+    "$(json_str "$IMAGE")" "$(json_str "$RB_NETWORK")" "$(json_str "$RB_MEMORY")" "$(json_str "$RB_DISK_LIMIT")" \
     "$RB_CPUS" "$RB_PIDS" "$RB_TTL" "$RB_SYSTEMD" "$(json_str "$RB_WORKDIR")" "$RB_WEIGHT"
 }
 

@@ -327,6 +327,7 @@ func (b *ContainerBackend) spec(rb Runbook, attemptID string, spawnedAt, expires
 		LabelExpires:   expires.Format(time.RFC3339),
 		LabelSpawnedAt: spawnedAt.Format(time.RFC3339),
 		LabelWeight:    strconv.Itoa(rb.EffectiveWeight()),
+		LabelDiskLimit: strconv.FormatInt(rb.EffectiveDiskLimitBytes(), 10),
 	}
 
 	cfg := &container.Config{

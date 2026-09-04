@@ -121,3 +121,30 @@ func TestLoadScenario_MissingDigestFailsClosed(t *testing.T) {
 		t.Error("LoadScenario with no digest should fail Validate(), not load silently")
 	}
 }
+
+// TestEffectiveDiskLimitBytes_UnsetMeansDefault is the disk-cap analogue of
+// EffectiveWeight's own "unset means 1, not 0" rule. A hand-built Runbook
+// JSON (bench/staircase.sh, a bare curl call) that never sets disk_limit at
+// all must still get a real, enforceable cap -- not silently spawn
+// unlimited, which was the actual state of the whole codebase before this
+// field existed.
+func TestEffectiveDiskLimitBytes_UnsetMeansDefault(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want int64
+	}{
+		{"empty string", "", defaultDiskLimitBytes},
+		{"garbage value", "not-a-size", defaultDiskLimitBytes},
+		{"explicit 256m", "256m", 256 << 20},
+		{"explicit 1g", "1g", 1 << 30},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			rb := Runbook{DiskLimit: c.in}
+			if got := rb.EffectiveDiskLimitBytes(); got != c.want {
+				t.Errorf("EffectiveDiskLimitBytes(%q) = %d, want %d", c.in, got, c.want)
+			}
+		})
+	}
+}

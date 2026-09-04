@@ -91,6 +91,48 @@ func TestParseSession_WeightDefaultsToOne(t *testing.T) {
 	}
 }
 
+func TestParseSession_DiskLimitFromLabel(t *testing.T) {
+	now := time.Now().UTC()
+	labels := map[string]string{
+		sandbox.LabelAttempt:   "attempt-1",
+		sandbox.LabelExpires:   now.Add(time.Hour).Format(TimeFormat),
+		sandbox.LabelDiskLimit: "536870912", // 512m, as container.go stamps it
+	}
+	sess, _, ok := ParseSession("c1", "running", labels)
+	if !ok {
+		t.Fatal("expected a parseable session")
+	}
+	if sess.DiskLimitBytes != 536870912 {
+		t.Errorf("DiskLimitBytes = %d, want 536870912", sess.DiskLimitBytes)
+	}
+}
+
+// TestSession_OverDiskLimit is the reaper's actual enforcement predicate
+// (cmd/orchestrator's reapTick). False on either side being 0 is
+// deliberate: DiskUsedBytes is only real when the caller collected with
+// Size requested (CollectManaged does; CollectAll/hostmon does not), and an
+// unset DiskLimitBytes must never read as "0 bytes allowed" -- that would
+// destroy every session on the very next tick.
+func TestSession_OverDiskLimit(t *testing.T) {
+	cases := []struct {
+		name string
+		sess Session
+		want bool
+	}{
+		{"under limit", Session{DiskLimitBytes: 512 << 20, DiskUsedBytes: 100 << 20}, false},
+		{"over limit", Session{DiskLimitBytes: 512 << 20, DiskUsedBytes: 600 << 20}, true},
+		{"limit unset", Session{DiskUsedBytes: 600 << 20}, false},
+		{"used not collected (size not requested)", Session{DiskLimitBytes: 512 << 20}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := c.sess.OverDiskLimit(); got != c.want {
+				t.Errorf("OverDiskLimit() = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
 func TestSession_Expired(t *testing.T) {
 	now := time.Now()
 	past := Session{ExpiresAt: now.Add(-time.Minute)}

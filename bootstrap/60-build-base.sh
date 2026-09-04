@@ -101,9 +101,38 @@ echo "   this takes 2-5 minutes and is quiet for long stretches; do not interrup
 # would be destroyed each time. First build fills it; later builds are local
 # disk instead of network.
 mkdir -p "$CACHE_DIR"
+
+# debootstrap fetches every package directly via wget (or curl if wget is
+# missing) against $MIRROR -- it does not go through apt at all for this
+# stage. If the host has IPv6 configured but the mirror's IPv6 route is
+# slow, blackholed, or simply absent, wget tries AAAA first and times out
+# per package before falling back to IPv4 -- a well-known cause of a
+# many-hour debootstrap that otherwise completes in minutes. Scope the fix
+# to wget's own config for just this call, not host-wide networking: no
+# sysctl, nothing that outlives this script or needs undoing if it crashes
+# partway through.
+WGETRC_BAK=""
+if [[ -f /etc/wgetrc ]]; then
+  WGETRC_BAK="$(mktemp)"
+  cp /etc/wgetrc "$WGETRC_BAK"
+fi
+restore_wgetrc() {
+  if [[ -n "$WGETRC_BAK" ]]; then
+    mv "$WGETRC_BAK" /etc/wgetrc
+  else
+    rm -f /etc/wgetrc
+  fi
+}
+trap restore_wgetrc EXIT
+{ [[ -f /etc/wgetrc ]] && cat /etc/wgetrc; echo "inet4-only = on"; } > /etc/wgetrc.praxis-tmp
+mv /etc/wgetrc.praxis-tmp /etc/wgetrc
+
 debootstrap --arch="$ARCH" --variant=minbase --include="$PKGS" \
   --cache-dir="$CACHE_DIR" \
   "$RELEASE" "$ROOTFS" "$MIRROR"
+
+restore_wgetrc
+trap - EXIT
 
 # --- candidate user and check-script drop-in ----------------------------------
 # useradd's home-dir copy touches things that expect /proc to exist; bind-mount

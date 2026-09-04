@@ -30,6 +30,15 @@ var _ Lister = (*client.Client)(nil)
 // Call this from inside the reaper tick and hand the result to
 // Registry.SetSnapshot, so one list call serves both reaping and metrics and a
 // scrape costs nothing on the socket.
+//
+// Requests per-container size (ContainerList's Size option) so the reaper
+// can enforce Session.OverDiskLimit without a second, per-container Inspect
+// call -- staying inside the "one list call" cost the doc comment above
+// promises. Size costs real time per container on the daemon side (it walks
+// each container's writable-layer directory); acceptable at this box's scale
+// but worth watching if PRAXIS_REAP_INTERVAL or the container count both
+// grow a lot. CollectAll skips it deliberately -- hostmon enforces nothing,
+// so it would pay that cost for no benefit.
 func CollectManaged(ctx context.Context, l Lister) Snapshot {
 	f := filters.NewArgs()
 	f.Add("label", LabelAttemptID)
@@ -45,7 +54,7 @@ func CollectAll(ctx context.Context, l Lister) Snapshot {
 	return collect(ctx, l, filters.NewArgs(), false)
 }
 
-func collect(ctx context.Context, l Lister, f filters.Args, managedOnly bool) Snapshot {
+func collect(ctx context.Context, l Lister, f filters.Args, withSize bool) Snapshot {
 	snap := Snapshot{
 		TakenAt: time.Now(),
 		Orphans: map[OrphanKind]int{},
@@ -53,6 +62,7 @@ func collect(ctx context.Context, l Lister, f filters.Args, managedOnly bool) Sn
 
 	containers, err := l.ContainerList(ctx, types.ContainerListOptions{
 		All:     true, // exited-but-present is a state we report on, not a state we ignore
+		Size:    withSize,
 		Filters: f,
 	})
 	if err != nil {
@@ -69,6 +79,13 @@ func collect(ctx context.Context, l Lister, f filters.Args, managedOnly bool) Sn
 			// orphan — the filter matched the label but the value was garbage.
 			snap.Orphans[kind]++
 			continue
+		}
+		if withSize {
+			// SizeRw is the writable/diff layer specifically -- not
+			// SizeRootFs, which includes the (shared, read-only) base image
+			// layers underneath it and would make every container look like
+			// it's already near any sane per-attempt cap.
+			sess.DiskUsedBytes = c.SizeRw
 		}
 		snap.Sessions = append(snap.Sessions, sess)
 	}
