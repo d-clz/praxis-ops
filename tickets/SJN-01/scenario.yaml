@@ -21,6 +21,14 @@ runtime:
   pids_limit: 256
   ttl_seconds: 3600
   read_only: false
+  # container.go's spec() ALWAYS sets Cmd (Entrypoint if set, else a
+  # hardcoded "sleep infinity" fallback) -- Cmd on create always overrides
+  # an image's own baked CMD, standard Docker semantics. Without this, every
+  # real spawn of this ticket silently ran sleep infinity instead of
+  # entrypoint.sh, and the planted writer process never ran at all. Found
+  # via a real spawn through the orchestrator, not review -- the log's line
+  # count didn't move between two reads two seconds apart.
+  entrypoint: ["/opt/praxis/entrypoint.sh"]
 
 detect:
   - the process appending to /var/log/app/service.log is no longer running

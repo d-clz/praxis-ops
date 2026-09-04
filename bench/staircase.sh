@@ -151,12 +151,27 @@ RB_WORKDIR="$(yaml_val workdir /home/candidate)"
 # having to remember this script also needs editing.
 RB_WEIGHT="$(yaml_val weight 1)"
 
-log "ticket=$RUNBOOK image=$IMAGE network=$RB_NETWORK memory=$RB_MEMORY disk_limit=$RB_DISK_LIMIT cpus=$RB_CPUS pids_limit=$RB_PIDS ttl_seconds=$RB_TTL systemd=$RB_SYSTEMD weight=$RB_WEIGHT"
+# entrypoint is a YAML flow-sequence ("[\"/opt/praxis/entrypoint.sh\"]"), not
+# a scalar -- yaml_val's quote-stripping doesn't apply and would mangle it.
+# Found the hard way: container.go's spec() ALWAYS sets Cmd (Entrypoint if
+# non-empty, else a hardcoded "sleep infinity" fallback), and Cmd on create
+# always overrides an image's own baked CMD. Without forwarding this,
+# SJN-01 spawns ran sleep infinity instead of its planted writer, silently,
+# every time -- confirmed via a real spawn whose log line count never moved.
+# A YAML flow-sequence of double-quoted strings already IS valid JSON, so
+# this passes through unquoted and unmodified; empty means "no entrypoint
+# set", which the [] fallback makes explicit rather than an absent field
+# doing the same thing implicitly.
+RB_ENTRYPOINT="$(printf '%s\n' "$RUNTIME_BLOCK" | grep -E '^[[:space:]]*entrypoint:' | head -1 \
+  | sed -E 's/^[[:space:]]*entrypoint:[[:space:]]*//; s/[[:space:]]*#.*//; s/[[:space:]]*$//')"
+RB_ENTRYPOINT="${RB_ENTRYPOINT:-[]}"
+
+log "ticket=$RUNBOOK image=$IMAGE network=$RB_NETWORK memory=$RB_MEMORY disk_limit=$RB_DISK_LIMIT cpus=$RB_CPUS pids_limit=$RB_PIDS ttl_seconds=$RB_TTL systemd=$RB_SYSTEMD weight=$RB_WEIGHT entrypoint=$RB_ENTRYPOINT"
 
 runbook_json() {
-  printf '{"image":%s,"network":%s,"memory":%s,"disk_limit":%s,"cpus":%s,"pids_limit":%s,"ttl_seconds":%s,"systemd":%s,"workdir":%s,"weight":%s}' \
+  printf '{"image":%s,"network":%s,"memory":%s,"disk_limit":%s,"cpus":%s,"pids_limit":%s,"ttl_seconds":%s,"systemd":%s,"workdir":%s,"weight":%s,"entrypoint":%s}' \
     "$(json_str "$IMAGE")" "$(json_str "$RB_NETWORK")" "$(json_str "$RB_MEMORY")" "$(json_str "$RB_DISK_LIMIT")" \
-    "$RB_CPUS" "$RB_PIDS" "$RB_TTL" "$RB_SYSTEMD" "$(json_str "$RB_WORKDIR")" "$RB_WEIGHT"
+    "$RB_CPUS" "$RB_PIDS" "$RB_TTL" "$RB_SYSTEMD" "$(json_str "$RB_WORKDIR")" "$RB_WEIGHT" "$RB_ENTRYPOINT"
 }
 
 json_str() { printf '"%s"' "$(printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g')"; }
