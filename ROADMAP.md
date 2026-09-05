@@ -53,6 +53,28 @@ into `main` closes this phase.
   Also measures idle-hold cost only, not an active candidate's real load.
   Re-benchmark before treating 11 as more than a reasonable starting
   point — see `docs/capacity-benchmark.md` for what would change it.
+  **Superseded mid-Stage-5, 2026-09-05:** the real SJN-01 staircase found
+  the actual binding constraint is a podman/containers-storage userns/idmap
+  ceiling around ~60 concurrent containers — see next bullet and
+  `docs/capacity-benchmark.md`'s "Known host constraint" section for the
+  full diagnosis. `PRAXIS_CAPACITY_WEIGHT` will be reset for real once
+  CPT-01's run is in too.
+- **~60 concurrent containers is a podman internals ceiling, not a host
+  resource limit.** Confirmed via three separate attempts (original
+  65,536-UID subuid pool, a 16x-widened pool, and after `podman system
+  migrate`) all failing at the identical weight with the identical error —
+  `"creating an ID-mapped copy of layer" ... "potentially insufficient
+  UIDs or GIDs available in user namespace (requested 65537:65537...)"`.
+  Real resource usage at that point was healthy (~11% memory, 52% storage
+  free, zero PSI/OOM). This is a known, unresolved-upstream class of
+  podman/containers-storage behavior (see
+  [containers/podman #20139](https://github.com/containers/podman/discussions/20139)),
+  not something fixable from this project's own config. Full writeup:
+  `docs/capacity-benchmark.md`. Applies to any ticket using
+  `--userns=auto`, not just SJN-01 — a real fix (podman/containers-storage
+  version upgrade, or disabling the ID-mapped-copy sharing optimization if
+  a safe toggle exists) is a separate, dedicated follow-up, not something
+  to chase inside capacity planning.
 - **No destroy reason survives past the container itself.** Confirmed by
   reading `internal/api/server.go`'s `get()`: it returns a flat `404 {"error":
   "no such instance"}` whether the attempt_id never existed, expired on TTL,

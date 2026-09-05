@@ -18,6 +18,119 @@ up to "the limit."
 
 ---
 
+## Known host constraint: podman userns/idmap ceiling (~60-64 containers)
+
+Discovered 2026-09-04/05, running the real SJN-01 staircase (`docs/capacity-benchmark.md`'s
+own SJN-01 entry below). This is not one of `bench/staircase.sh`'s four
+documented stop conditions (PSI, storage, OOM, neighbour) — it's a fifth,
+previously-unknown failure mode that turned out to be the actual binding
+constraint on this host, arriving well before any of the four monitored
+conditions got close to tripping.
+
+### Symptom
+
+Every SJN-01 staircase run stopped at the exact same point — held 60
+concurrent containers cleanly, failed on the 65th spawn attempt — across
+three separate attempts, none of which moved the number even slightly:
+
+1. Original run: `/etc/subuid`/`/etc/subgid` at the host's auto-assigned
+   `165536:65536` (65,536 total delegated subordinate UIDs/GIDs for
+   `praxis-sbx`). Failed at weight 65.
+2. Widened `/etc/subuid`/`/etc/subgid` to `165536:1048576` (16x larger) and
+   redeployed. **Failed at weight 65 again, identical error text.**
+3. Ran `podman system migrate` (podman's own suggested remedy, printed in
+   the error message itself) on top of the widened range. **Failed at
+   weight 65 again, still identical error text.**
+
+The orchestrator's log for the failing spawn (`journalctl --user -u
+praxis-orchestrator`):
+
+```
+create failed err="create sbx-bench-...-064: Error response from daemon:
+container create: creating container storage: creating an ID-mapped copy
+of layer \"...\": creating copy of template layer \"...\" with ID \"...\":
+potentially insufficient UIDs or GIDs available in user namespace
+(requested 65537:65537 for /home/praxis-sbx/.local/share/containers/
+storage/overlay/...): Check /etc/subuid and /etc/subgid if configured
+locally and run \"podman system migrate\": chown ...: invalid argument"
+```
+
+The requested value (`65537:65537` — exactly `65536 + 1`) never changed
+across any of the three attempts, despite the real subuid pool size
+changing by 16x. That alone rules out subuid pool size as the actual
+constraint, whatever the error message's own suggested remedy implies.
+
+### What was ruled out, with real measurements
+
+- **Not host resource pressure.** At the last held weight (60), real memory
+  usage was ~1.6GB out of 14GB (~11%), storage was 52% free (well above the
+  20% floor), PSI was `0.00`/`0.00`, and zero OOM kills — all four of
+  `bench/staircase.sh`'s real stop conditions were nowhere close.
+- **Not loop devices.** `losetup -a` showed exactly 1 active loop device at
+  failure time, against a `max_loop` module parameter of 8 — nowhere near
+  exhausted.
+- **Not the kernel's global user-namespace limit.**
+  `/proc/sys/user/max_user_namespaces` reported `50238` — vastly more than
+  64.
+- **Not the subuid/subgid pool size**, confirmed empirically as above
+  (widening it 16x changed nothing).
+
+### What it actually is
+
+The error originates from podman/`containers-storage`'s "ID-mapped copy of
+layer" mechanism — an optimization that uses the kernel's ID-mapped mounts
+feature (`mount_setattr(MOUNT_ATTR_IDMAP)`) to let multiple `--userns=auto`
+containers share the same underlying base image layer without a full
+copy-on-write duplication per container. This is a distinct code path from
+plain container spawning, and it's the thing that's actually failing here
+— not container creation in general.
+
+This is a real, if murky, class of podman/containers-storage behavior, not
+specific to this host or this project's configuration. From public
+reports of the same error class:
+
+- [containers/podman discussion #20139](https://github.com/containers/podman/discussions/20139) —
+  the closest match found: a user hit the identical error class (there, on
+  `podman import`, triggered by a single file inside the image owned by a
+  GID outside the available subordinate range). The discussion was never
+  conclusively resolved upstream — the reporter's own summary after two
+  weeks: *"I suspect that it either should have been filed as an issue, or
+  nobody has any ideas."* A later commenter (months afterward) confirmed
+  hitting the same thing with no fix either. The only workaround mentioned
+  (`--storage-opt ignore_chown_errors=true`) applies to `podman import`
+  specifically, not `container create`'s ID-mapped-copy path this project
+  actually hit, and even its own reporter was unsure what it silently
+  breaks.
+- [containers/podman issue #12715](https://github.com/containers/podman/issues/12715) and
+  [Red Hat Solution 7005221](https://access.redhat.com/solutions/7005221) —
+  same error family on image pull; consistent with this being a known,
+  recurring rough edge in how podman's rootless userns/idmap machinery
+  behaves, not a one-off.
+
+Given upstream itself hasn't nailed down a fix for the same error class,
+further chasing this from the application/config side (this project has no
+access to podman/containers-storage internals) has poor expected payoff.
+
+### What this means for capacity planning
+
+**On this host, with the currently-installed podman version, ~60 concurrent
+`--userns=auto` containers is the real, binding ceiling — for any ticket,
+not just SJN-01.** It's a property of container creation generally (the
+ID-mapped layer copy path engages for every `--userns=auto` spawn sharing a
+base layer), not of SJN-01's specific resource profile. CPT-01's own
+staircase run may hit this same wall, independent of whatever memory/PSI
+behavior it shows on its own.
+
+This ceiling could plausibly move with a podman/containers-storage version
+upgrade, or by disabling the ID-mapped-copy sharing optimization if a
+config toggle for it exists and its performance/correctness trade-off is
+understood — neither investigated here, since it's a genuinely separate
+piece of work from ticket capacity planning and the upstream trail runs
+cold. Worth a dedicated follow-up if headroom above ~60 concurrent real
+assessments is ever actually needed.
+
+---
+
 ## 2026-09-03 — SJN-01, weight 16
 
 - **Ticket:** SJN-01 (`ops-base` image, no systemd — the only ticket
