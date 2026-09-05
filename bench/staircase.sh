@@ -162,8 +162,15 @@ RB_WEIGHT="$(yaml_val weight 1)"
 # this passes through unquoted and unmodified; empty means "no entrypoint
 # set", which the [] fallback makes explicit rather than an absent field
 # doing the same thing implicitly.
+# The `|| true` matters: unlike yaml_val's other extractions (which happen
+# to survive a no-match grep because they run inside a function assigning
+# to a `local` variable), this one is a bare top-level pipeline -- under
+# set -euo pipefail, grep finding nothing here (any ticket with no
+# entrypoint: field, e.g. CPT-01/SKN-01) exits the whole script instantly
+# and silently, no error printed. Found the hard way: a real CPT-01 run
+# died before its first log line, leaving nothing but empty-headers CSVs.
 RB_ENTRYPOINT="$(printf '%s\n' "$RUNTIME_BLOCK" | grep -E '^[[:space:]]*entrypoint:' | head -1 \
-  | sed -E 's/^[[:space:]]*entrypoint:[[:space:]]*//; s/[[:space:]]*#.*//; s/[[:space:]]*$//')"
+  | sed -E 's/^[[:space:]]*entrypoint:[[:space:]]*//; s/[[:space:]]*#.*//; s/[[:space:]]*$//')" || true
 RB_ENTRYPOINT="${RB_ENTRYPOINT:-[]}"
 
 log "ticket=$RUNBOOK image=$IMAGE network=$RB_NETWORK memory=$RB_MEMORY disk_limit=$RB_DISK_LIMIT cpus=$RB_CPUS pids_limit=$RB_PIDS ttl_seconds=$RB_TTL systemd=$RB_SYSTEMD weight=$RB_WEIGHT entrypoint=$RB_ENTRYPOINT"
