@@ -30,51 +30,68 @@ duplicate the docs' content into it.
      day-to-day ops.
   6. `bench/staircase.sh` real capacity benchmark, rewritten from scratch
      against the real API.
-  - **Closed out 2026-09-03** with a real benchmark run against SJN-01 —
-    `docs/capacity-benchmark.md`. `PRAXIS_CAPACITY_WEIGHT` moved from a
-    guessed `2` to a measured `11`.
+  - **Closed out for real 2026-09-06**, after an earlier 2026-09-03 close-out
+    turned out to be invalid (see below). This pass additionally built the
+    `ops-systemd` base tier, built and live-verified both SJN-01 and CPT-01
+    as real images (not bare `ops-base`), added a per-container disk cap
+    (`Runbook.DiskLimit`, closing a real gap where nothing previously
+    stopped a `root_in_sandbox` ticket writing unboundedly), and ran real
+    capacity benchmarks against both real tickets. Full writeup and final
+    numbers: `docs/capacity-benchmark.md`.
+    `PRAXIS_CAPACITY_WEIGHT` moved `2` (guess) → `11` (invalid, measured
+    against fake data) → **`35`** (real, CPT-01-driven, 70% of its measured
+    ceiling of 50).
+  - **The 2026-09-03 close-out was invalid** and is kept in
+    `docs/capacity-benchmark.md` marked as superseded, not deleted:
+    `bench/staircase.sh`'s `IMAGE` resolves independently of `RUNBOOK`, so
+    that run spawned bare `praxis/ops-base` sixteen times, not real SJN-01
+    — no ticket image had actually been built yet at that point. Caught by
+    the user asking directly whether a real ticket had ever been baked into
+    the benchmark; it hadn't.
   - Everything in this phase was verified against the real host at every
-    step, not just against what compiled — see `docs/session-03-plan.md`
-    "Real bugs this pass found" for the pattern worth remembering.
+    step, not just against what compiled. Real bugs this pass found, worth
+    remembering: `container.go`'s spec() always overrides an image's own
+    baked `CMD` (via `Entrypoint` or a hardcoded `sleep infinity` fallback),
+    which meant SJN-01 never actually ran its planted writer process until
+    `scenario.yaml` explicitly set `entrypoint:`; `bench/staircase.sh` had a
+    `set -e`-under-`pipefail` bug that silently killed the whole script for
+    any ticket with no `entrypoint:` field (CPT-01, SKN-01) with zero error
+    output; `nginx-light` needed `debootstrap --components=main,universe`,
+    not just `--include`; and the real ~60-concurrent-container ceiling
+    turned out to be a podman/containers-storage internals limit, not a
+    host resource one (see below) — none of these were visible from code
+    review, only from real spawns.
 
 Repo pushed to `github.com/d-clz/praxis-ops`; `upgraded-phase-d` merging
 into `main` closes this phase.
 
 ## In flight / keep an eye on
 
-- **Low priority, not yet actioned:** `teardown()`'s 5s sleep can race
-  hostmon's 15s poll interval, producing a spurious "survived explicit
-  destroy" warning with nothing actually left in `podman ps`. Seen twice,
-  both false positives. Revisit if it shows up a third time *with*
-  something real still running.
-- **`PRAXIS_CAPACITY_WEIGHT=11`** is evidence-based but conservative: the
-  SJN-01 staircase hit its own `MAX_WEIGHT=16` ceiling without tripping a
-  real stop condition, so the true SJN-01 limit is unmeasured and higher.
-  Also measures idle-hold cost only, not an active candidate's real load.
-  Re-benchmark before treating 11 as more than a reasonable starting
-  point — see `docs/capacity-benchmark.md` for what would change it.
-  **Superseded mid-Stage-5, 2026-09-05:** the real SJN-01 staircase found
-  the actual binding constraint is a podman/containers-storage userns/idmap
-  ceiling around ~60 concurrent containers — see next bullet and
-  `docs/capacity-benchmark.md`'s "Known host constraint" section for the
-  full diagnosis. `PRAXIS_CAPACITY_WEIGHT` will be reset for real once
-  CPT-01's run is in too.
-- **~60 concurrent containers is a podman internals ceiling, not a host
-  resource limit.** Confirmed via three separate attempts (original
+- **The `teardown()`-vs-hostmon-poll race scales with teardown size, not
+  just a fixed small chance.** Originally seen twice at low concurrency (1
+  sandbox "survived," always a confirmed false positive). At CPT-01's real
+  weight-55 teardown, **19 of 55** were reported as surviving — still a
+  confirmed false positive (`podman ps -a` empty immediately after), but
+  the much larger fraction at higher concurrency suggests the race gets
+  worse as concurrency grows, not that it's a fixed rare glitch. Still
+  low-priority (never once found a real leaked container across four
+  occurrences now), but worth an actual fix before running at
+  even-higher real concurrency, rather than continuing to re-verify by
+  hand each time.
+- **Podman/containers-storage's userns/idmap ceiling (~60 concurrent
+  containers) is a real, currently-below-the-radar host constraint** —
+  full diagnosis in `docs/capacity-benchmark.md`'s "Known host constraint"
+  section. Not currently the binding number (CPT-01's disk-driven ceiling
+  of 50 is lower), but would matter if the `praxis-sbx` storage volume is
+  ever widened. Confirmed via three separate real attempts (original
   65,536-UID subuid pool, a 16x-widened pool, and after `podman system
-  migrate`) all failing at the identical weight with the identical error —
-  `"creating an ID-mapped copy of layer" ... "potentially insufficient
-  UIDs or GIDs available in user namespace (requested 65537:65537...)"`.
-  Real resource usage at that point was healthy (~11% memory, 52% storage
-  free, zero PSI/OOM). This is a known, unresolved-upstream class of
-  podman/containers-storage behavior (see
-  [containers/podman #20139](https://github.com/containers/podman/discussions/20139)),
-  not something fixable from this project's own config. Full writeup:
-  `docs/capacity-benchmark.md`. Applies to any ticket using
-  `--userns=auto`, not just SJN-01 — a real fix (podman/containers-storage
-  version upgrade, or disabling the ID-mapped-copy sharing optimization if
-  a safe toggle exists) is a separate, dedicated follow-up, not something
-  to chase inside capacity planning.
+  migrate`) all failing at the identical weight with the identical error;
+  this is a known, unresolved-upstream class of podman/containers-storage
+  behavior ([containers/podman #20139](https://github.com/containers/podman/discussions/20139)),
+  not something fixable from this project's own config. A real fix
+  (podman/containers-storage version upgrade, or disabling the
+  ID-mapped-copy sharing optimization if a safe toggle exists) is a
+  separate, dedicated follow-up.
 - **No destroy reason survives past the container itself.** Confirmed by
   reading `internal/api/server.go`'s `get()`: it returns a flat `404 {"error":
   "no such instance"}` whether the attempt_id never existed, expired on TTL,
@@ -98,19 +115,17 @@ into `main` closes this phase.
 
 ## Next milestones
 
-1. **`ops-systemd` base image tier.** Blocks CPT-01 entirely — it's the
-   only ticket that needs systemd-as-PID-1 in the container. Needed before
-   CPT-01 can be built, checked, *or* benchmarked (the real worst-case
-   weight number depends on this).
-2. **Bake pipeline.** All three tickets still have `substrate_image:
-   REPLACE_AT_BAKE` — nothing produces a real pinned digest yet.
-   `docs/ops-ticket-spec.md`.
-3. **Scoring envelope.** Not started. Grading/check-script execution
+1. **Bake pipeline.** SJN-01 and CPT-01 now have real, hand-built local
+   images (`praxis/sjn-01`, `praxis/cpt-01`) with their real digests
+   recorded in `scenario.yaml`, but nothing automates build → digest →
+   pin the way a real pipeline would; SKN-01 still has an unbuilt
+   `substrate_image: REPLACE_AT_BAKE`. `docs/ops-ticket-spec.md`.
+2. **Scoring envelope.** Not started. Grading/check-script execution
    against a submitted attempt.
-4. **The portal.** Separate team's deliverable; this repo exposes the
+3. **The portal.** Separate team's deliverable; this repo exposes the
    `X-Praxis-Token`-gated HTTP API for it to integrate against
    (`orchestrator/README.md`) but the portal itself isn't this repo's work.
-5. **Operator dashboard + browser shell — new branch, new feature,
+4. **Operator dashboard + browser shell — new branch, new feature,
    not started.** Scoped in `docs/session-03-plan.md` ("Next: operator
    dashboard with an embedded shell"). Central blocker already identified:
    `/shell` is a raw HTTP hijack, not a real WebSocket — a browser can't
@@ -118,3 +133,11 @@ into `main` closes this phase.
    choice, where the dashboard is served from, and how a browser holds
    `X-Praxis-Token` without leaking it. Branch off `main` once this merges;
    do not build on `upgraded-phase-d`.
+5. **Every ticket still leaves `Runbook.Weight` unset (flat weight=1),
+   despite now having real comparative cost data.** SJN-01 and CPT-01 have
+   measurably different real resource profiles (CPT-01 hits a disk ceiling
+   at 50, SJN-01 doesn't until a podman internals limit at 60) — weighted
+   admission exists specifically to let heavier tickets consume more of
+   `PRAXIS_CAPACITY_WEIGHT` per instance, but nothing has ever set a
+   non-default weight to make use of that. Candidate follow-up, not
+   scoped further here.

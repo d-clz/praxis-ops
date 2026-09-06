@@ -41,10 +41,11 @@ func main() {
 	// Weight, not a flat container count: PRAXIS_MAX_CONCURRENT is retired.
 	// Every current ticket (SJN-01/SKN-01/CPT-01) leaves Runbook.Weight unset,
 	// which EffectiveWeight() treats as 1 -- so this is a flat concurrent
-	// count until a ticket sets a real weight. 11 = ~70% of the measured
-	// SJN-01 staircase steady-state (docs/capacity-benchmark.md,
-	// 2026-09-03); matches the deploy unit's default on purpose.
-	capacityWeight := envInt("PRAXIS_CAPACITY_WEIGHT", 11)
+	// count until a ticket sets a real weight. 35 = ~70% of CPT-01's real
+	// measured staircase ceiling (50, disk-bound -- docs/capacity-benchmark.md
+	// "Phase D close-out", 2026-09-05/06); matches the deploy unit's default
+	// on purpose.
+	capacityWeight := envInt("PRAXIS_CAPACITY_WEIGHT", 35)
 	execTimeout := time.Duration(envInt("PRAXIS_EXEC_TIMEOUT", 120)) * time.Second
 
 	backend, err := sandbox.NewContainerBackend()

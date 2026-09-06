@@ -1,7 +1,7 @@
 # SJN-01 -- Ops substrate, star 3. Discovery: find the actor.
 id: SJN-01
 substrate_class: ops
-substrate_image: registry.local/praxis/ops-base@sha256:REPLACE_AT_BAKE
+substrate_image: praxis/sjn-01@sha256:c56135a710bff4762e8b5ef378cdbd089cce4336719ad72913abf143dd7b7c52
 family: process-forensics
 star: 3
 delivery: live_sandbox

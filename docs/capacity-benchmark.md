@@ -131,7 +131,18 @@ assessments is ever actually needed.
 
 ---
 
-## 2026-09-03 — SJN-01, weight 16
+## 2026-09-03 — SJN-01, weight 16 — SUPERSEDED, see 2026-09-04/05 below
+
+**This entry does not measure SJN-01.** `bench/staircase.sh`'s `IMAGE` is
+resolved completely independently of `RUNBOOK`/`scenario.yaml`, and no
+ticket image had ever actually been built yet at this point — this run
+spawned bare `praxis/ops-base` sixteen times (idle, no seeded fault, no
+planted processes), not real SJN-01 containers. The resource *envelope*
+below (memory/cpu/pids ceilings) was accurate to SJN-01's `scenario.yaml`,
+but the *contents* were not. Kept for the record, not deleted — the lesson
+about the benchmark script's own `IMAGE`/`RUNBOOK` independence is real and
+worth remembering. Do not use any number in this section for capacity
+planning; see the real results below.
 
 - **Ticket:** SJN-01 (`ops-base` image, no systemd — the only ticket
   buildable right now; CPT-01 needs the still-missing `ops-systemd` tier).
@@ -205,24 +216,158 @@ measured, by an amount this run doesn't quantify. Treat the weight-16
 result as a **lower bound on cost**, not a prediction of real production
 load.
 
-### Recommendation
+### Recommendation (superseded)
 
-Per the script's own stated rule (~70% of steady-state weight), and given
-steady-state here means "held 16 with zero measured pressure," not "found
-the wall": set `PRAXIS_CAPACITY_WEIGHT=11` as the production value — a
-large, evidence-based improvement over the original placeholder guess of
-2, while staying conservative against the two caveats above (16 is a
-floor, not the real ceiling; idle load is cheaper than active load).
+~~Set `PRAXIS_CAPACITY_WEIGHT=11`~~ — see the 2026-09-04/05 entries below
+for the number actually used. The reasoning here (70% of a weight-16 floor
+measured against an idle non-ticket) does not survive contact with the
+real ticket images; kept only so the historical reasoning chain is visible.
 
-Revisit this number when either becomes true:
-- CPT-01 / `ops-systemd` exists and gets its own staircase run (it will
-  cost more per sandbox — real systemd + nginx + generated logs, even
-  idle — and is the real worst case this project needs a number for).
-- Someone wants the actual SJN-01 ceiling rather than a floor: re-run with
-  `MAX_WEIGHT=32` or higher and see what, if anything, actually trips.
+---
 
-### Not addressed by this run
+## 2026-09-04/05 — SJN-01, real ticket, weight 60 (real ceiling, host-independent cause)
 
-CPT-01/`ops-systemd` benchmarking (blocked on the image tier not existing
-yet), and the operator dashboard idea in `docs/session-03-plan.md` (parked
-for a later phase, unrelated to capacity).
+- **Ticket:** SJN-01, real image (`praxis/sjn-01@sha256:c561...b7c52`,
+  built from `tickets/SJN-01/Containerfile` against `praxis/ops-base`).
+- **Result files:** four attempts, all consistent —
+  `bench/results/20260904T171525Z/` (invalid: hit the then-current
+  `PRAXIS_CAPACITY_WEIGHT=11` admission gate, not a real limit — a
+  methodology mistake, corrected for the next three),
+  `bench/results/20260904T195341Z/`, `bench/results/20260904T211012Z/`
+  (after widening `/etc/subuid`/`/etc/subgid` 16x), and
+  `bench/results/20260905T001607Z/` (after `podman system migrate` on top
+  of the widened range — the canonical, final result).
+- **Host:** Intel Core i5-7500 @ 3.40GHz, 4 cores/4 threads, Linux
+  7.0.0-31-generic (Ubuntu 26.04 "resolute").
+- **Stopped because:** a podman/containers-storage userns/idmap internals
+  ceiling, not a host resource limit — full diagnosis in "Known host
+  constraint" above. **Confirmed real and reproducible**: identical failure
+  at the identical weight across three attempts, including two real
+  attempts to fix it (widening the subuid pool 16x, then `podman system
+  migrate`), neither of which moved the number at all.
+
+### What the data shows
+
+**Host resources were healthy the whole time — this was not a resource
+squeeze.** At the last held weight (60): memory ~1.6GB of 14GB (~11%),
+storage 52% free (well above the 20% floor), PSI `0.00`/`0.00`, zero OOM
+kills. The stop condition that actually fired isn't one of
+`bench/staircase.sh`'s four monitored ones at all.
+
+**Real per-instance memory cost is ~15x higher than the superseded
+ops-base run suggested**, and it keeps climbing for as long as a session
+runs. At weight 11 in an intermediate real-ticket attempt, `slice_mem_bytes`
+was already ~275MB (~25MB/instance) versus the fake run's ~27MB *total* at
+weight 16. Within a single held step (constant weight), memory climbed
+continuously — e.g. 14.4MB→16.8MB over one 180s step at weight 1 — almost
+certainly page cache for the actively-growing `/var/log/app/service.log`
+file the planted writer never stops appending to. A real SJN-01 session
+gets more expensive in memory terms the longer it runs unresolved, not
+just with added concurrency.
+
+**Spawn latency has a large, real cold-cache tax — and it's not what you'd
+pay in steady-state production.** The first real-ticket attempt (image
+never spawned before) plateaued at ~4.7–5.0s per spawn from step 3 onward.
+Every subsequent attempt against the *same, now-cached* image spawned
+consistently in **0.15–0.4s** — roughly 15–20x faster, including the very
+first container of each of those later runs. Podman's local image/layer
+cache being warm is the deciding factor, not something about the box
+warming up generally. Since a real deployment reuses the same pinned
+ticket image across every candidate session, **the realistic steady-state
+spawn cost is ~0.2–0.4s, not the ~5s a cold first-ever spawn costs** — size
+expectations (and any spawn-latency stop condition) around the warm number.
+
+### Caveat
+
+This is a podman-version/host-specific internals limit, not a law of
+physics — it could plausibly move with a podman/containers-storage
+upgrade. Treat 60 as "the real number for this deployment today," not an
+architectural ceiling of the project itself.
+
+---
+
+## 2026-09-05 — CPT-01, real ticket, weight 50 (real ceiling, genuine host resource limit)
+
+- **Ticket:** CPT-01, real image (`praxis/cpt-01@sha256:7e1f...9435`,
+  built from `tickets/CPT-01/Containerfile` against the new
+  `praxis/ops-systemd` base — `bootstrap/61-build-systemd-base.sh`).
+- **Result file:** `bench/results/20260905T085953Z/` (two earlier attempts
+  the same day, `20260905T085152Z`/`20260905T085656Z`, died before their
+  first spawn due to a real `bench/staircase.sh` bug — a `set -e` pipeline
+  failure whenever a ticket has no `entrypoint:` field, fixed same-day,
+  commit `8d61556`).
+- **Stopped because:** `container storage 19% free < 20%` — **the first
+  genuinely host-resource-driven stop condition this whole benchmarking
+  pass found.** This is real, not an artifact: storage actually crossed
+  the configured floor.
+
+### What the data shows
+
+**CPT-01 is disk-bound well before it's memory-bound, and well before the
+podman userns ceiling that capped SJN-01.** `storage_free_pct` declined
+from 51% (weight 5) to 19% (weight 55) — **~0.64 points per additional
+container**, meaningfully faster than SJN-01's ~0.45 points/instance. The
+heavier `ops-systemd`-derived image (systemd + nginx-light + more seeded
+files) means a bigger overlay writable layer per spawn, so storage runs out
+at a *lower* concurrency (50) than the userns wall (~60) would have allowed.
+
+**Memory is cheap and essentially flat per instance** — unlike SJN-01,
+there's no runaway writer here (nginx is seeded disabled, per `seed.sh`'s
+planted faults). `slice_mem_bytes` grew from ~121.5MB (weight 10) to
+~315MB (weight 50): **~4.8MB per additional instance**, holding steady
+within each step rather than climbing over time. PSI stayed `0.00`/`0.00`
+and OOM stayed `0` throughout — memory was never close to binding.
+
+**Spawn latency plateaus immediately, same shape as SJN-01, at a slightly
+higher baseline.** After one cold first spawn (0.22s — already cache-warm
+from the earlier failed attempts same day), every subsequent spawn held at
+~5.4–6.3s through weight 55, `spawn p95` = 5.82s, no degradation trend with
+concurrency. The ~0.6s-higher plateau than SJN-01's ~4.8–5.0s is consistent
+with a bigger image (systemd + nginx-light) taking marginally longer to
+instantiate even warm.
+
+### Caveat
+
+Disk is genuinely the limiter here, at a level the box's real 25GB
+`praxis-sbx` storage volume can be a target for widening if more
+concurrent CPT-01 capacity is ever needed — this is a real, fixable
+capacity lever (bigger volume), unlike SJN-01's podman-internals wall.
+
+---
+
+## Phase D close-out: final recommendation (2026-09-05/06)
+
+Two real tickets, two different real binding constraints, on real
+hardware (Intel i5-7500, 4 cores, 14GB RAM, Linux 7.0.0-31-generic):
+
+| Ticket | Real ceiling | Bound by |
+|---|---|---|
+| SJN-01 | ~60 | podman/containers-storage userns/idmap internals (host resources healthy) |
+| CPT-01 | ~50 | host disk (`praxis-sbx`'s 25GB volume, real 20% floor crossed) |
+
+Per this project's own stated benchmarking principle
+(`docs/observability.md` §4: *"Benchmark against the worst-case mix, not
+the average"*) — size against the heavier real ticket, CPT-01, not the
+lighter one. **`PRAXIS_CAPACITY_WEIGHT=35`** (70% of CPT-01's 50, the
+script's own stated rule), replacing the earlier placeholder progression
+(2 → 11 → this). Since SJN-01's real ceiling (60) sits comfortably above
+this value, staying under 35 keeps both tickets within their own real
+limits automatically.
+
+This number will move if either becomes true:
+- The `praxis-sbx` storage volume is resized — CPT-01's ceiling is a real,
+  fixable disk constraint, not an architectural one.
+- A future ticket is heavier than CPT-01 on either axis — re-benchmark
+  against it specifically, not against an average.
+- The podman/containers-storage userns/idmap ceiling moves (version
+  upgrade) — currently irrelevant to the binding number since CPT-01's
+  disk limit (50) is already below it (60), but would matter if a disk
+  upgrade ever pushed past ~60.
+
+### Not addressed by this phase
+
+The operator dashboard idea (`docs/session-03-plan.md`, deliberately
+parked for a later, separate branch), SKN-01 benchmarking (never built —
+its own fixed-content ticket profile is expected to be lighter than
+either SJN-01 or CPT-01, not the worst case), and the bake pipeline
+automation (`ROADMAP.md`, tracked separately).

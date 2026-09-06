@@ -20,13 +20,17 @@ Environment=PRAXIS_LISTEN=127.0.0.1:8081
 # current ticket leaves Runbook.Weight unset, which EffectiveWeight()
 # treats as 1, so this is a flat concurrent-sandbox count until a second
 # ticket sets a real weight.
-# 11 = ~70% of the measured SJN-01 staircase steady-state (16, itself the
-# run's own MAX_WEIGHT ceiling, not a discovered wall -- see
-# docs/capacity-benchmark.md, 2026-09-03). Replaces the earlier placeholder
-# guess of 2. Re-benchmark and bump this once CPT-01/ops-systemd exists --
-# it's the real worst-case ticket and will cost more per sandbox than SJN-01
-# even idle.
-Environment=PRAXIS_CAPACITY_WEIGHT=11
+# 35 = ~70% of CPT-01's real measured staircase ceiling (50), the heavier
+# of the two real tickets -- see docs/capacity-benchmark.md's "Phase D
+# close-out" section, 2026-09-05/06. CPT-01 is disk-bound (praxis-sbx's
+# storage volume), SJN-01 is bound by an unrelated podman/containers-
+# storage userns/idmap internals limit (~60) that sits above this value,
+# so sizing against CPT-01 keeps both tickets within their own real
+# ceilings. Replaces 2 (guess) and 11 (measured against bare ops-base,
+# not a real ticket -- see the superseded 2026-09-03 entry in
+# docs/capacity-benchmark.md). Re-benchmark if the storage volume is ever
+# resized, or if a future ticket proves heavier than CPT-01.
+Environment=PRAXIS_CAPACITY_WEIGHT=35
 Environment=PRAXIS_REAP_INTERVAL=30
 Environment=PRAXIS_EXEC_TIMEOUT=120
 # Shared secret with the portal. Keep it out of the unit file in anything but a POC.
