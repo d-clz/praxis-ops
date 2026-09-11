@@ -88,10 +88,32 @@ into `main` closes this phase.
   migrate`) all failing at the identical weight with the identical error;
   this is a known, unresolved-upstream class of podman/containers-storage
   behavior ([containers/podman #20139](https://github.com/containers/podman/discussions/20139)),
-  not something fixable from this project's own config. A real fix
-  (podman/containers-storage version upgrade, or disabling the
-  ID-mapped-copy sharing optimization if a safe toggle exists) is a
-  separate, dedicated follow-up.
+  not something fixable from this project's own config.
+- **The same defect permanently leaks disk on every real container spawn
+  — a bigger, separate finding from 2026-09-10, not just the concurrency
+  ceiling above.** `podman rm`/the orchestrator's `Destroy()` never
+  reclaims the private "ID-mapped copy of layer" a container creates to
+  view a shared base image under its own UID range — confirmed live,
+  ~19GB of orphaned directories survived with zero containers running,
+  count matching the week's total spawns, not concurrency. This will
+  happen from **normal production operation**, not just benchmarking —
+  every real candidate session leaks one, permanently, forever, regardless
+  of TTL or `PRAXIS_CAPACITY_WEIGHT`. Workaround shipped:
+  `bootstrap/90-storage-maintenance.sh`, a scripted reset-and-rebuild,
+  triggered manually by watching hostmon's `praxis_storage_free_bytes`.
+  **The real fix is deferred, not built in this MVP**: a targeted cleanup
+  in `container.go`'s `Destroy()` that identifies and removes a specific
+  container's own leaked copy (via its `GraphDriver.Data.LowerDir`) instead
+  of periodically resetting everything. Not attempted yet because the
+  actual `LowerDir` pattern needed to safely distinguish "this container's
+  private leaked copy" from "the real, must-never-delete base image layer"
+  was never directly observed this session — implementing filesystem
+  deletion in the orchestrator's destroy path on a guess is a worse risk
+  than the disk leak itself. Also learned the hard way and now documented
+  as a hard rule: **never run `podman save`, `system check`, or `system
+  migrate` on this host** — all three independently made storage *worse*
+  (see `docs/capacity-benchmark.md`'s "Second finding" section) despite
+  looking like safe, read-only diagnostics.
 - **No destroy reason survives past the container itself.** Confirmed by
   reading `internal/api/server.go`'s `get()`: it returns a flat `404 {"error":
   "no such instance"}` whether the attempt_id never existed, expired on TTL,
@@ -133,6 +155,14 @@ into `main` closes this phase.
    choice, where the dashboard is served from, and how a browser holds
    `X-Praxis-Token` without leaking it. Branch off `main` once this merges;
    do not build on `upgraded-phase-d`.
+5. **Real fix for the per-spawn storage leak** (2026-09-10 finding — see
+   "In flight" above and `docs/capacity-benchmark.md`). Targeted cleanup in
+   `container.go`'s `Destroy()`, identifying and removing a container's own
+   leaked "ID-mapped copy of layer" via its `GraphDriver.Data.LowerDir`
+   instead of relying on periodic full resets
+   (`bootstrap/90-storage-maintenance.sh`). Needs the real `LowerDir`
+   pattern observed and confirmed safe against a throwaway container first
+   — do not write storage-deletion code in the destroy path on a guess.
 5. **Every ticket still leaves `Runbook.Weight` unset (flat weight=1),
    despite now having real comparative cost data.** SJN-01 and CPT-01 have
    measurably different real resource profiles (CPT-01 hits a disk ceiling

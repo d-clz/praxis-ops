@@ -169,3 +169,20 @@ user with `podman build`.
 - any nftables change
 - a podman upgrade
 - granting a new capability to any ticket tier
+
+## Storage maintenance (`90`)
+
+`90-storage-maintenance.sh` is a full reset-and-rebuild, not a prune. On this
+podman version, every `--userns=auto` spawn leaks a full, untracked copy of
+whatever base layer it used, and `podman rm` never reclaims it -- confirmed
+live, ~19GB of orphaned directories survived even with zero containers
+running. No config fixes this; it's an unresolved-upstream podman/
+containers-storage defect. Full writeup and what NOT to run instead
+(`podman save`, `system check`, `system migrate` all made it worse):
+`docs/capacity-benchmark.md`, "Known host constraint".
+
+Refuses to run against a live session -- needs a genuine maintenance window,
+triggered by watching hostmon's `praxis_storage_free_bytes`
+(`:9102/metrics`, no auth) drop uncomfortably low. Deliberately manual, not
+cron'd: storage operations on this host have already produced two
+unpredictable surprises, so a human stays in the loop for this one.

@@ -129,6 +129,92 @@ piece of work from ticket capacity planning and the upstream trail runs
 cold. Worth a dedicated follow-up if headroom above ~60 concurrent real
 assessments is ever actually needed.
 
+### Second finding, 2026-09-10: the same defect also permanently leaks disk, and `save`/`system check`/`system migrate` make it worse
+
+Discovered chasing an unrelated question ("why is `~praxis-sbx/.local`
+using 19GB?" — real content across all four images is ~278.5MB, confirmed
+via direct `du` on each image's `GraphDriver.Data.UpperDir`; the rest was
+orphaned). Two separate, now-confirmed facts, not one:
+
+**Fact 1 — the ID-mapped-copy mechanism leaks a full physical copy on every
+spawn, permanently, regardless of container lifetime.** `podman rm` (via
+the orchestrator's own `Destroy()`, confirmed identical) correctly removes
+a container's own top read-write layer — that part of podman works fine,
+`podman ps -a` came back empty after every teardown, every time. What it
+never touches is the *separate* "ID-mapped copy of the shared base layer"
+each container privately created to get a properly-owned view of read-only
+content under its own unique subordinate UID range. That copy survives the
+container that made it, forever. 148 orphaned ~150MB directories were
+found on disk, matching almost exactly the total container-spawn count
+across the whole benchmarking week (SJN-01 ≈60 + CPT-01 ≈55 + dozens of
+verification/hardening-check spawns) — this is a leak from **normal
+orchestrator operation**, not a diagnostic-tooling artifact. Every real
+candidate session will leak one of these in production, permanently,
+independent of TTL or `PRAXIS_CAPACITY_WEIGHT`.
+
+Ruled out as an explanation: `dmesg -T | grep -i -E "overlay|idmap|loop"`
+returned nothing at the time this was investigated, despite the mechanism
+having fired 148+ times — no kernel-level idmap failure is being logged.
+The copy-fallback appears to be a decision inside podman/containers-storage's
+own userspace code, not a kernel/filesystem-level failure being caught and
+worked around (an earlier draft of this section suspected the loop-mounted
+storage volume specifically; the dmesg check doesn't support that, and no
+further evidence was gathered either way).
+
+**Fact 2 — `podman save`, `podman system check`, and `podman system
+migrate` are NOT safe read-only operations on this host; all three
+independently made things worse.** Established via direct on-disk
+timestamp evidence (`find -printf '%T@'` on the orphaned directories),
+which ruled out the two more obvious suspects: not the two `system
+migrate` runs from days earlier (wrong time), and not spread across the
+whole benchmarking week (wrong time too) — every single flagged
+directory's mtime clustered within minutes of a `podman save
+praxis/ops-base praxis/ops-systemd praxis/sjn-01 praxis/cpt-01` command
+run specifically to make a pre-repair backup:
+
+- `podman save` given multiple image names silently resolved **all four**
+  to the same wrong blob (`ops-base`'s) — every save/load round-trip
+  produced a tarball where `sjn-01`/`cpt-01`/`ops-systemd`'s tags pointed
+  at `ops-base`'s content. Recovered without data loss only because the
+  real, correctly-content-addressed images were still present in storage
+  under their original IDs, just untagged — re-tagging by hand fixed it.
+  A save/load cycle trusted at face value would have silently lost track
+  of three of four real images.
+- `podman system check` (run immediately after, no `--repair`/`--force`)
+  reported 145 of 148 overlay directories as "damaged" — including **all
+  four of the real, currently-tagged, already-live-verified images**, not
+  just the genuine orphans. Every file within a flagged layer showed the
+  identical "before" mtime shifting to the identical "after" value,
+  consistent with the check's own verification walk triggering the same
+  broken copy mechanism merely by reading a layer, then reporting the
+  metadata drift it just caused as pre-existing "damage". `--repair`'s own
+  description ("Remove inconsistent images") would very likely have
+  deleted all four real images along with the actual garbage, given they
+  were flagged identically to the orphans.
+- Direct `du` measurement (bypassing podman's own reporting) also caught
+  `podman images`/`system df` reporting `ops-base` at 2.04GB against a
+  real on-disk size of 125MB — a ~16x inflation, and `sjn-01` similarly
+  off by ~55x (19.53MB reported vs 352KB real). Podman's own size
+  bookkeeping is unreliable on this host too, a further reason not to
+  trust its self-reported numbers for capacity decisions going forward —
+  use `du`/`df` directly instead.
+
+**The only operation validated as safe here: `podman system reset`**,
+which wipes both the files and podman's own database consistently, rather
+than trusting any surgical/partial operation to know what's safe to touch.
+See `bootstrap/90-storage-maintenance.sh` — a scripted reset-and-rebuild,
+refusing to run against a live session, restoring from source
+(`bootstrap/60-build-base.sh`, `61-build-systemd-base.sh`, each ticket's
+`Containerfile`/`seed.sh`) rather than from any backup. **Do not run
+`podman save`, `system check`, or `system migrate` on this host outside of
+that script's own controlled use** — diagnose disk/image state with `df`,
+`du`, `podman ps -a`, and `podman inspect` on a specific known ID instead.
+
+The real fix — a targeted cleanup in the orchestrator's own `Destroy()`
+path that removes a container's specific leaked copy instead of
+periodically resetting everything — is a genuine, separate piece of work,
+deferred rather than built here; see `ROADMAP.md`.
+
 ---
 
 ## 2026-09-03 — SJN-01, weight 16 — SUPERSEDED, see 2026-09-04/05 below
