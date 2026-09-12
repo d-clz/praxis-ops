@@ -1,7 +1,7 @@
 # CPT-01 -- Ops substrate, star 4. Layered service repair. Requires systemd.
 id: CPT-01
 substrate_class: ops
-substrate_image: praxis/cpt-01@sha256:7e1f05fcbaadae3d4b33ba050099eeb0b496defc4d8a5fd191ac9ca65a943485
+substrate_image: praxis/cpt-01@sha256:5966484110495921be550c322b4dc144a7391664b2eb79c878ee937b9e9d2115
 family: service-repair
 star: 4
 delivery: live_sandbox

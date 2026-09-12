@@ -210,6 +210,21 @@ refusing to run against a live session, restoring from source
 that script's own controlled use** — diagnose disk/image state with `df`,
 `du`, `podman ps -a`, and `podman inspect` on a specific known ID instead.
 
+**Run and validated for real, 2026-09-11/12**: `bootstrap/90-storage-maintenance.sh`
+reclaimed **18,426MB** (25GB volume: 19GB used / 82% → 815MB used / 4%),
+confirming the entire ~19GB really was the leak, not legitimate content.
+Both base images and both ticket images rebuilt clean; containment
+re-verified at the identical bar as the original build — `50-verify.sh`
+28/28 on both `ops-base` and `ops-systemd`, `verify-shell-isolation.sh`
+7/7. New ticket digests (content changed because the rebuild is a fresh
+debootstrap, not because anything about the tickets' seeded behavior
+changed): `praxis/sjn-01@sha256:31a20c68...5925bd4`,
+`praxis/cpt-01@sha256:59664841...e9d2115` — recorded in each ticket's
+`scenario.yaml`. Not re-run: Stage-4-style behavioral verification (does
+SJN-01's writer process actually start, is CPT-01's nginx actually seeded
+disabled) — recommended before trusting these two specific images for
+anything beyond structural/containment purposes.
+
 The real fix — a targeted cleanup in the orchestrator's own `Destroy()`
 path that removes a container's specific leaked copy instead of
 periodically resetting everything — is a genuine, separate piece of work,
