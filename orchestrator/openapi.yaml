@@ -1,0 +1,512 @@
+openapi: 3.0.3
+info:
+  title: Praxis Orchestrator API
+  version: "1.0"
+  description: |
+    Takes a Runbook plus an attempt_id and drives a container runtime. Knows
+    nothing about tickets, stars, gates, or scoring -- that boundary is load
+    bearing (see orchestrator/README.md). State lives on the runtime as
+    labels; there is no database, so a restart rebuilds the whole world from
+    a label selector.
+
+    This document describes the real, already-shipped surface as it exists
+    today -- written as the contract for the operator dashboard and the
+    mock server (cmd/mockorchestrator) to build against, not retrofitted
+    documentation. If this file and the code ever disagree, the code is
+    right and this file has drifted -- file that as a bug against this spec.
+
+    Every route except /healthz requires the shared X-Praxis-Token header.
+    This proves the caller IS an authorized operator or the portal, not
+    which candidate it's acting for -- see securitySchemes below and each
+    route's own description for what it does and doesn't authorize.
+servers:
+  - url: http://127.0.0.1:8081
+    description: Default bind address (PRAXIS_LISTEN)
+
+security:
+  - praxisToken: []
+
+paths:
+  /healthz:
+    get:
+      summary: Liveness and running-instance count
+      description: |
+        The one unauthenticated route. Reports whether the backend
+        (podman socket) is reachable, not whether any particular session
+        is healthy.
+      security: []
+      responses:
+        "200":
+          description: Backend reachable
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, running]
+                properties:
+                  ok: { type: boolean }
+                  running: { type: integer, description: "Count of managed containers, any state" }
+        "503":
+          description: Backend unreachable (e.g. DOCKER_HOST misconfigured)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /instances:
+    post:
+      summary: Spawn (or idempotently re-fetch) a sandbox
+      description: |
+        attempt_id is the idempotency key. A repeat call with an
+        already-running attempt_id returns the existing instance rather
+        than spawning a second one -- what makes a caller's timeout/retry
+        safe. Only a genuinely new instance consumes weight budget against
+        PRAXIS_CAPACITY_WEIGHT; a live re-count is done on every call to
+        avoid a stale-cache over-admission window (see internal/api/
+        server.go's own comment on why this bypasses the cached /metrics
+        snapshot).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [attempt_id, runbook]
+              properties:
+                attempt_id:
+                  type: string
+                  pattern: "^[a-z0-9-]{1,59}$"
+                  description: "Lowercase, [a-z0-9-], 1-59 chars, no leading/trailing hyphen"
+                runbook: { $ref: "#/components/schemas/Runbook" }
+      responses:
+        "202":
+          description: Spawned (or idempotency hit against an existing instance)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Instance" }
+        "400":
+          description: Malformed body, or an invalid Runbook/attempt_id
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429":
+          description: At capacity -- used+incoming weight exceeds PRAXIS_CAPACITY_WEIGHT
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "500":
+          description: Spawn failed for a reason not covered above
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /instances/{attemptID}:
+    get:
+      summary: Fetch one instance's current state
+      parameters:
+        - $ref: "#/components/parameters/AttemptID"
+      responses:
+        "200":
+          description: Found
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Instance" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404":
+          description: |
+            No such instance -- returned identically whether the
+            attempt_id never existed, expired on TTL, exceeded its disk
+            cap, or was explicitly destroyed. There is currently no way
+            to distinguish these after the fact (tracked gap, see
+            ROADMAP.md "No destroy reason survives past the container
+            itself").
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+    delete:
+      summary: Explicitly destroy an instance
+      description: |
+        Idempotent-safe: destroying an attempt_id that doesn't exist
+        returns destroyed:false, not an error.
+      parameters:
+        - $ref: "#/components/parameters/AttemptID"
+      responses:
+        "200":
+          description: Destroy attempted (check `destroyed` for whether anything was actually there)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [attempt_id, destroyed]
+                properties:
+                  attempt_id: { type: string }
+                  destroyed: { type: boolean }
+        "400":
+          description: Backend error attempting the destroy
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /instances/{attemptID}/exec:
+    post:
+      summary: Run a script as root, report exit code and output
+      description: |
+        Deliberately dumb: the orchestrator does not know this is a check
+        script, does not parse its output, and does not decide pass or
+        fail. The caller (the portal, or an operator by hand) does all
+        three. Requires the instance to be in the running state.
+      parameters:
+        - $ref: "#/components/parameters/AttemptID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [script_b64]
+              properties:
+                script_b64:
+                  type: string
+                  format: byte
+                  description: Base64-encoded script contents
+                timeout_seconds:
+                  type: integer
+                  description: Overrides PRAXIS_EXEC_TIMEOUT for this call only
+      responses:
+        "200":
+          description: Script ran to completion (or timed out) -- check exit_code
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ExecResult" }
+        "400":
+          description: Malformed body, or script_b64 isn't valid base64
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409":
+          description: Instance not running
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "500":
+          description: Exec failed at the backend level (not the script's own exit code)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /instances/{attemptID}/shell:
+    post:
+      summary: Interactive shell -- raw HTTP hijack, NOT a WebSocket
+      description: |
+        **Non-standard.** This is a raw HTTP/1.1 connection hijack
+        (`101 Switching Protocols`, a custom `Upgrade: praxis-shell`
+        header), not an RFC 6455 WebSocket -- a browser's native
+        WebSocket API cannot speak to this endpoint. It works for
+        `curl -N` and for a server-to-server caller that can hold a raw
+        duplex TCP/TLS connection open (the portal backend, pxoctl).
+
+        For a browser client (the operator dashboard), use
+        `GET /instances/{attemptID}/shell/ws` instead, which performs a
+        real WebSocket handshake. Both routes attach to the identical
+        underlying PTY mechanism (`Backend.ExecShell`) -- they differ
+        only in the wire framing used to reach a browser vs. a raw
+        socket client.
+
+        Once the `101` response is sent, every byte in either direction
+        is opaque terminal traffic -- no framing, no parsing. `?user=`
+        selects the exec user inside the container (default `candidate`).
+      parameters:
+        - $ref: "#/components/parameters/AttemptID"
+        - $ref: "#/components/parameters/ShellUser"
+      responses:
+        "101":
+          description: |
+            Switching Protocols. After this point the connection is no
+            longer HTTP -- there is no further JSON response to document.
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409":
+          description: Instance not running
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "500":
+          description: Exec/hijack failed at the backend level
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /instances/{attemptID}/shell/ws:
+    get:
+      summary: Interactive shell -- real RFC 6455 WebSocket
+      description: |
+        The browser-compatible sibling of `POST .../shell`. Same
+        underlying PTY (`Backend.ExecShell`), real WebSocket framing.
+
+        Browsers cannot attach custom headers to a WebSocket handshake,
+        so `X-Praxis-Token` does not apply here -- the token instead
+        travels as the `Sec-WebSocket-Protocol` value (a well-known
+        mitigation for this exact limitation: unlike a URL query
+        parameter, a subprotocol value is not written to server access
+        logs, browser history, or a `Referer` header). The server echoes
+        the same value back as the negotiated subprotocol on a
+        successful handshake.
+
+        Binary WebSocket messages carry raw terminal bytes in both
+        directions -- no additional framing on top of what WebSocket
+        itself provides. `?user=` behaves identically to the hijack
+        route.
+      parameters:
+        - $ref: "#/components/parameters/AttemptID"
+        - $ref: "#/components/parameters/ShellUser"
+        - name: Sec-WebSocket-Protocol
+          in: header
+          required: true
+          schema: { type: string }
+          description: Carries the shared token in place of X-Praxis-Token.
+      responses:
+        "101":
+          description: Switching Protocols -- a real WebSocket handshake succeeded.
+        "401":
+          description: |
+            Missing/wrong token. Since this is a WebSocket upgrade
+            attempt, a browser surfaces this as a failed connection, not
+            a readable JSON body -- there is no response payload to
+            inspect on this path the way there is on every other route.
+        "409":
+          description: Instance not running
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /reap:
+    post:
+      summary: Manually trigger reap (TTL + disk-cap expiry) now
+      description: |
+        The on-demand path. The automatic background reaper
+        (cmd/orchestrator/main.go) does not call this -- it derives its
+        own expiry decision from the same metrics snapshot it publishes,
+        a deliberately separate, known-duplicated implementation. This
+        exists for an operator who doesn't want to wait for
+        PRAXIS_REAP_INTERVAL.
+      responses:
+        "200":
+          description: Reap ran (possibly reaping nothing)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [reaped]
+                properties:
+                  reaped:
+                    type: array
+                    items: { type: string }
+                    description: attempt_ids destroyed by this call
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "500":
+          description: Reap failed at the backend level
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /metrics:
+    get:
+      summary: Prometheus text-exposition metrics
+      description: |
+        Hand-rolled exposition format (no client_golang dependency).
+        Same auth as every other route but /healthz -- session counts
+        and runbook digests are not public. Machine-oriented; the
+        dashboard uses GET /sessions and GET /dashboard/summary instead
+        of parsing this.
+      responses:
+        "200":
+          description: OK
+          content:
+            text/plain:
+              schema: { type: string }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /sessions:
+    get:
+      summary: Per-session detail as JSON
+      description: |
+        The orchestrator's own label-filtered view (see
+        docs/observability.md's two-view model) -- cannot see containers
+        without praxis labels; hostmon's independent, unauthenticated
+        view is what covers that blind spot. Data can be up to
+        PRAXIS_REAP_INTERVAL stale, since it's read from the same cached
+        snapshot the reaper publishes each tick, not recomputed live.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SessionsResponse" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /dashboard/summary:
+    get:
+      summary: Dashboard-convenience JSON summary (new, this feature)
+      description: |
+        A small, JSON-friendly restatement of the same reaper snapshot
+        /metrics and /sessions already expose -- exists purely so the
+        dashboard's JS doesn't need to parse the Prometheus text format.
+        Not a new data source; see docs/dashboard-spec.md for exactly
+        which fields come from where and how stale each one can be.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DashboardSummary" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+components:
+  securitySchemes:
+    praxisToken:
+      type: apiKey
+      in: header
+      name: X-Praxis-Token
+      description: |
+        Shared secret, constant-time compared. Proves the caller is an
+        authorized operator or portal, not which candidate it acts for
+        -- see orchestrator/README.md's "who calls this" section.
+
+  parameters:
+    AttemptID:
+      name: attemptID
+      in: path
+      required: true
+      schema: { type: string }
+    ShellUser:
+      name: user
+      in: query
+      required: false
+      schema: { type: string, default: candidate }
+      description: Exec user inside the container.
+
+  responses:
+    Unauthorized:
+      description: Missing or wrong X-Praxis-Token
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string }
+
+    Runbook:
+      type: object
+      required: [image, network, memory, cpus, pids_limit, ttl_seconds]
+      description: |
+        Backend-neutral, never carries Docker/Kubernetes-native fields.
+        image MUST be digest-pinned (repo@sha256:<hex>) -- Validate()
+        rejects anything else. See internal/sandbox/runbook.go.
+      properties:
+        image:
+          type: string
+          description: "repo@sha256:<hex>, required"
+        systemd: { type: boolean, default: false }
+        root_in_sandbox: { type: boolean, default: true }
+        network: { type: string, enum: [none, internal], default: none }
+        memory: { type: string, example: "512m" }
+        cpus: { type: number, example: 1.0 }
+        pids_limit: { type: integer, example: 256 }
+        ttl_seconds: { type: integer, example: 3600, maximum: 86400 }
+        tmpfs:
+          type: object
+          additionalProperties: { type: string }
+          example: { "/tmp": "size=64m" }
+        entrypoint:
+          type: array
+          items: { type: string }
+          description: |
+            Overrides the image's own baked CMD if set (container.go's
+            spec() always sets Cmd -- Entrypoint if non-empty, else a
+            hardcoded "sleep infinity" fallback). A ticket relying on
+            its own baked CMD/entrypoint script MUST set this field
+            explicitly -- confirmed the hard way (ROADMAP.md, SJN-01's
+            planted writer silently never ran until this was fixed).
+        workdir: { type: string, default: "/home/candidate" }
+        weight:
+          type: integer
+          default: 1
+          description: |
+            Admission unit summed against PRAXIS_CAPACITY_WEIGHT.
+            Unset/<=0 defaults to 1 -- every currently-shipped ticket
+            leaves this unset despite having real, measurably different
+            costs (see ROADMAP.md).
+        read_only: { type: boolean, default: false }
+        disk_limit:
+          type: string
+          default: "512m"
+          description: |
+            Caps the container's writable overlay layer (parsed like
+            memory). Unset/unparseable defaults to 512m, never
+            "unlimited" -- see EffectiveDiskLimitBytes.
+
+    Instance:
+      type: object
+      required: [attempt_id, name, status, expires_at, runbook_digest]
+      properties:
+        attempt_id: { type: string }
+        name: { type: string, description: "sbx-<attempt_id>" }
+        status: { type: string, enum: [running, exited, created, absent] }
+        expires_at: { type: string, format: date-time }
+        runbook_digest: { type: string, example: "sha256:..." }
+        container_id: { type: string }
+
+    ExecResult:
+      type: object
+      required: [exit_code, stdout, stderr, duration_seconds]
+      properties:
+        exit_code: { type: integer }
+        stdout: { type: string }
+        stderr: { type: string }
+        duration_seconds: { type: number }
+
+    SessionRow:
+      type: object
+      properties:
+        attempt_id: { type: string }
+        container_id: { type: string }
+        runbook: { type: string, description: "digest, from praxis.runbook-digest" }
+        state: { type: string }
+        weight: { type: integer }
+        spawned_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+        remaining_seconds:
+          type: integer
+          description: Negative once expired.
+        expired: { type: boolean }
+
+    SessionsResponse:
+      type: object
+      properties:
+        view: { type: string, example: orchestrator }
+        taken_at: { type: string, format: date-time }
+        total_seen: { type: integer }
+        sessions:
+          type: array
+          items: { $ref: "#/components/schemas/SessionRow" }
+        orphan_counts:
+          type: object
+          additionalProperties: { type: integer }
+          description: "Keyed by orphan kind: unmanaged, unparseable_label, unreaped"
+
+    DashboardSummary:
+      type: object
+      required: [capacity_used, capacity_limit, session_count, taken_at]
+      properties:
+        capacity_used: { type: integer, description: "praxis_capacity_weight_used, same source as /metrics" }
+        capacity_limit: { type: integer, description: "PRAXIS_CAPACITY_WEIGHT" }
+        session_count: { type: integer }
+        taken_at:
+          type: string
+          format: date-time
+          description: When the underlying reaper snapshot was collected -- not "now".
