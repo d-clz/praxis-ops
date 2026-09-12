@@ -65,6 +65,37 @@ duplicate the docs' content into it.
 Repo pushed to `github.com/d-clz/praxis-ops`; `upgraded-phase-d` merging
 into `main` closes this phase.
 
+- **Operator dashboard + browser shell.** Branch `operator-dashboard`, off
+  `main` per this doc's own earlier instruction. Scoped in
+  `docs/session-03-plan.md`, functional contract in
+  `docs/dashboard-spec.md`, API contract in `orchestrator/openapi.yaml`.
+  Five stages, all real-verified (not just built): the API contract
+  written first; a real RFC 6455 WebSocket shell (`GET
+  .../shell/ws`, `github.com/coder/websocket` — this project's first new
+  Go dependency) sitting *alongside* the existing raw-hijack `/shell`,
+  not replacing it; `cmd/mockorchestrator` + `internal/mockbackend`, a
+  real, runnable, no-podman stand-in wired through the *same*
+  `api.New()`/`Routes()` production runs, "for integration ready" per
+  explicit request; and the dashboard itself (`internal/dashboard`,
+  `go:embed`, served at `/ui/`), checked against every one of
+  `docs/dashboard-spec.md`'s acceptance criteria in a real Chrome tab —
+  login gating on a real API call, session list matching live data with
+  visible staleness, a real xterm.js terminal round-tripping real
+  keystrokes, and a visible disconnect banner when a session vanishes
+  mid-session.
+  - **A real, unrelated bug surfaced along the way**: the very first
+    `/shell` test this whole project ever ran used a plain `curl -N -X
+    POST` with no `--data` flag, which structurally could never have
+    forwarded live keystrokes — the "typing does nothing" it produced was
+    a test-tool artifact, not a defect in `ExecShell`/the relay. Confirmed
+    by dialing the new real-WebSocket endpoint with an actual
+    bidirectional client (a Go test, then a real browser); both worked
+    cleanly first try.
+  - **Deliberately descoped from the original sketch**: hostmon's
+    independent view is not surfaced here — see `docs/dashboard-spec.md`'s
+    Non-goals for why folding it in would undermine the two-view model's
+    whole point.
+
 ## In flight / keep an eye on
 
 - **The `teardown()`-vs-hostmon-poll race scales with teardown size, not
@@ -154,15 +185,7 @@ into `main` closes this phase.
 3. **The portal.** Separate team's deliverable; this repo exposes the
    `X-Praxis-Token`-gated HTTP API for it to integrate against
    (`orchestrator/README.md`) but the portal itself isn't this repo's work.
-4. **Operator dashboard + browser shell — new branch, new feature,
-   not started.** Scoped in `docs/session-03-plan.md` ("Next: operator
-   dashboard with an embedded shell"). Central blocker already identified:
-   `/shell` is a raw HTTP hijack, not a real WebSocket — a browser can't
-   speak to it as-is. Three open decisions before writing code: WS library
-   choice, where the dashboard is served from, and how a browser holds
-   `X-Praxis-Token` without leaking it. Branch off `main` once this merges;
-   do not build on `upgraded-phase-d`.
-5. **MVP2: real fix for the per-spawn storage leak** (2026-09-10 finding —
+4. **MVP2: real fix for the per-spawn storage leak** (2026-09-10 finding —
    see "In flight" above and `docs/capacity-benchmark.md`). Either a real
    periodic pruner, or a targeted cleanup in `container.go`'s `Destroy()`
    identifying and removing a container's own leaked "ID-mapped copy of
@@ -173,7 +196,7 @@ into `main` closes this phase.
    first — do not write storage-deletion code in the destroy path on a
    guess. Explicitly out of this MVP's scope; the reset-rebuild script is
    the accepted stopgap until this lands.
-6. **Every ticket still leaves `Runbook.Weight` unset (flat weight=1),
+5. **Every ticket still leaves `Runbook.Weight` unset (flat weight=1),
    despite now having real comparative cost data.** SJN-01 and CPT-01 have
    measurably different real resource profiles (CPT-01 hits a disk ceiling
    at 50, SJN-01 doesn't until a podman internals limit at 60) — weighted

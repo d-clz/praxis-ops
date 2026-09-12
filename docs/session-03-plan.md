@@ -31,10 +31,34 @@ without it), the scoring envelope, and the portal itself.
 
 ---
 
-## Next: operator dashboard with an embedded shell
+## Operator dashboard with an embedded shell — DONE (branch `operator-dashboard`)
 
-Not started. Decided to write the shape down now rather than build it
-without alignment, since it has real forks.
+Built and verified for real against a running `cmd/mockorchestrator` in an
+actual browser — login, session list, capacity, and a real xterm.js
+terminal round-tripping keystrokes through a real WebSocket, not just
+built to spec. Full functional contract: `docs/dashboard-spec.md`. Also
+folded into this pass, "for integration ready": `orchestrator/openapi.yaml`
+(the real API contract, written first) and `cmd/mockorchestrator` +
+`internal/mockbackend` (a real, runnable, no-podman stand-in for a portal/
+dashboard developer to build against).
+
+**One deliberate scope narrowing from this doc's original sketch:**
+hostmon's independent view is NOT surfaced in this dashboard — see
+`docs/dashboard-spec.md`'s Non-goals, which explains why folding it in
+would undermine the two-view model's whole point (hostmon staying
+independent so it keeps reporting if the orchestrator deadlocks). If a
+unified view is ever wanted, that's a separate, deliberate decision later,
+not something this pass did quietly.
+
+**A real, unrelated bug found while testing this, not related to the
+dashboard itself:** the first live test of `/shell` this whole project had
+used a plain `curl -N -X POST` with no `--data` flag, which sent an empty
+request body and could never have forwarded live keystrokes in the first
+place -- the "typing does nothing" it produced was a test-tool artifact,
+not a real defect in `ExecShell`/the relay. Confirmed by building the new
+real-WebSocket sibling endpoint and dialing it with an actual bidirectional
+client (`internal/api/server_test.go`'s `TestWsShell_RelaysBytesBothWays`,
+and later a real browser) — both worked cleanly on the first try.
 
 **Scope, settled:** this is an *operator* tool, not the portal. It doesn't
 authenticate candidates or map a login to one `attempt_id` -- it's a web
@@ -63,28 +87,22 @@ future portal backend talking server-to-server, but a browser's native
 handshake and frame format. A browser-based terminal needs real WebSocket
 support on the server side; this is not optional polish.
 
-### Decisions to make before writing code
+### Decisions to make before writing code — RESOLVED
 
-1. **WebSocket implementation.** Hand-roll RFC 6455 framing, or pull in a
-   small, established library (`github.com/coder/websocket`,
-   `gorilla/websocket`). This project has deliberately hand-rolled things
-   all session to dodge dependencies (the Prometheus exposition format
-   specifically to avoid `client_golang`) -- but that was printing text
-   lines; WS framing is security/correctness-sensitive binary protocol work
-   (masking, fragmentation, ping/pong, close handshakes). A library is very
-   likely the right call here despite the pattern, not a violation of it.
-   Would be the first new Go dependency added this session.
-2. **Where the dashboard lives.** Served by the orchestrator itself (new
-   route, `embed`-ded static assets, one binary, nothing new to deploy) vs.
-   a separate small service vs. a Claude Artifact. Leaning toward the
-   orchestrator serving it directly -- matches the project's "one thing to
-   deploy" pattern throughout, and sidesteps CORS/reachability questions a
-   separate service (or an Artifact hosted on claude.ai, reaching into a
-   private box) would introduce.
-3. **Token-in-a-browser.** `X-Praxis-Token` as a header works cleanly for
-   `curl`/`pxoctl`; a plain page navigation can't attach a header. Needs a
-   deliberate answer (token in a query param on first load then moved into
-   `sessionStorage`, a login form, something else) rather than accidentally
-   leaking it into browser history or a `Referer` header.
-
-Not scoped further than this until those three are settled.
+1. **WebSocket implementation → `github.com/coder/websocket`.** The
+   library call, as anticipated. Confirmed as the right *technique*, not
+   just a dependency choice: it's literally how AWS CloudShell and GCP
+   Cloud Shell work (real PTY, raw bytes relayed over a real WebSocket,
+   xterm.js rendering the stream in-browser). `/shell`'s raw hijack was
+   left completely unchanged, still the right choice for `curl -N`/a
+   future portal backend -- the new `GET .../shell/ws` sits alongside it,
+   not in place of it.
+2. **Where the dashboard lives → served by the orchestrator itself**, as
+   anticipated. `internal/dashboard`, `go:embed`'d, mounted at `/ui/` on
+   the same `*http.Server` -- one binary, nothing new to deploy.
+3. **Token-in-a-browser → `sessionStorage` + a login gate, `Sec-WebSocket-
+   Protocol` for the handshake specifically.** Never a query param. Full
+   reasoning and the one real bug this surfaced (a stored token was never
+   read back on page load, defeating the entire point of choosing
+   `sessionStorage`): `docs/dashboard-spec.md` and the `operator-dashboard`
+   branch's own commit history.
