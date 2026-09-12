@@ -102,3 +102,10 @@ than what it's actually showing.
 - **Session history / audit log.** Only currently-managed sessions are
   shown; nothing about a destroyed session persists in the dashboard after
   it's gone from `/sessions`.
+- **Remote/public reachability.** The dashboard rides `PRAXIS_LISTEN`'s
+  existing loopback-only bind — reaching it from off-box is an SSH tunnel
+  (`orchestrator/deploy/README.md`), not a server-side change. Rebinding to
+  a real interface would expose every other route too, not just `/ui/`,
+  and there is no inbound firewall today to fall back on
+  (`bootstrap/40-network-guard.sh` is outbound-only) — a deliberate,
+  separate decision if ever wanted, not something this feature does.
