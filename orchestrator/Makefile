@@ -2,16 +2,27 @@ BIN := orchestrator
 PKG := ./cmd/orchestrator
 HOSTMON_BIN := hostmon
 HOSTMON_PKG := ./cmd/hostmon
+MOCK_BIN := mockorchestrator
+MOCK_PKG := ./cmd/mockorchestrator
 SBX_USER := praxis-sbx
 SBX_HOME := $(shell getent passwd $(SBX_USER) | cut -d: -f6)
 
-.PHONY: build vet test deploy build-hostmon deploy-hostmon
+.PHONY: build vet test deploy build-hostmon deploy-hostmon build-mock
 
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o $(BIN) $(PKG)
 
 build-hostmon:
 	CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o $(HOSTMON_BIN) $(HOSTMON_PKG)
+
+# No deploy-mock target, deliberately: this is a portal/dashboard
+# developer's local tool (internal/mockbackend, no podman/host/root
+# requirement), not a production service anything installs alongside the
+# real orchestrator. `go run ./cmd/mockorchestrator` on any machine with Go
+# installed covers the actual use case without a build step at all; this
+# target exists only for a pinned/CI-friendly binary if one's ever wanted.
+build-mock:
+	CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o $(MOCK_BIN) $(MOCK_PKG)
 
 vet:
 	go vet ./...
