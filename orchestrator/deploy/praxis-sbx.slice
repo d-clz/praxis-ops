@@ -1,0 +1,44 @@
+# ~/.config/systemd/user/praxis-sbx.slice  (user praxis-sbx, uid 1001)
+#
+#   systemctl --user daemon-reload
+#   systemctl --user start praxis-sbx.slice
+#   systemctl --user enable praxis-sbx.slice   # persist across reboots
+#
+# Every sandbox container's cgroup nests here (internal/sandbox/container.go's
+# spec() sets HostConfig.CgroupParent to this slice's name). Installed as its
+# own persistent unit, not passed as an ad-hoc --cgroup-parent string on each
+# spawn: a cgroup-parent that only exists transiently, created and torn down
+# by whatever container happens to reference it, disappears the moment the
+# last sandbox exits -- which would just relocate the "PRAXIS_SLICE_PATH
+# doesn't exist" problem hostmon's silent-zero fix (cmd/hostmon/main.go)
+# already caught, from "always missing" to "missing whenever the box is
+# idle". Idle is the most common state to actually be reading these metrics
+# in. A real unit exists (and this path is readable) whether zero containers
+# or several are running under it.
+#
+# PRAXIS_SLICE_PATH assumed .../user@1001.service/praxis-sbx.slice before
+# this unit existed. Confirmed wrong against a real `systemctl --user status
+# praxis-sbx.slice`: systemd's own naming convention treats a hyphen in a
+# slice name as an implied parent -- the same reason user-1001.slice nests
+# under user.slice -- so "praxis-sbx.slice" silently nests under an implicit
+# praxis.slice systemd creates for it. The real path is
+# .../user@1001.service/praxis.slice/praxis-sbx.slice, one segment longer
+# than every PRAXIS_SLICE_PATH default assumed. Fixed in cmd/hostmon/main.go,
+# deploy/praxis-hostmon.service, and bench/staircase.sh to match -- not
+# renaming this unit to dodge the convention, since the convention is
+# systemd behaving correctly, not a bug to route around.
+
+[Unit]
+Description=Praxis sandbox slice -- every spawned container's cgroup nests here
+Before=slices.target
+
+[Slice]
+# No resource ceiling set here on purpose, for this POC. Per-container limits
+# already come from the Runbook (memory, pids_limit) via container.go's
+# spec(); a slice-wide MemoryMax/TasksMax here would be a SECOND ceiling to
+# keep in sync with PRAXIS_CAPACITY_WEIGHT by hand, and this unit exists to
+# give hostmon a stable place to read from -- not to be a second admission
+# control.
+
+[Install]
+WantedBy=default.target

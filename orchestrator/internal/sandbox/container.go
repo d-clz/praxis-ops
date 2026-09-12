@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"path"
+	"strconv"
 	"strings"
 	"time"
 
@@ -44,6 +45,17 @@ func NewContainerBackend() (*ContainerBackend, error) {
 
 func (b *ContainerBackend) Close() error { return b.cli.Close() }
 
+// RawClient exposes the underlying docker client for internal/metrics's
+// CollectManaged/CollectAll (which need a raw ContainerList, something the
+// Backend interface deliberately does not expose -- a future
+// KubernetesBackend has no reason to grow a docker-shaped method just to
+// satisfy a metrics package it may not even use the same way). Returning the
+// concrete *client.Client here, not a metrics-package type, is what keeps
+// this package from having to import internal/metrics at all: metrics
+// already imports sandbox (for its label constants), and the reverse would
+// be an import cycle.
+func (b *ContainerBackend) RawClient() *client.Client { return b.cli }
+
 func (b *ContainerBackend) Create(ctx context.Context, attemptID string, rb Runbook) (Instance, error) {
 	if err := rb.Validate(); err != nil {
 		return Instance{}, err
@@ -53,8 +65,9 @@ func (b *ContainerBackend) Create(ctx context.Context, attemptID string, rb Runb
 		return Instance{}, err
 	}
 
-	expires := time.Now().UTC().Add(rb.TTL())
-	cfg, hostCfg := b.spec(rb, attemptID, expires)
+	now := time.Now().UTC()
+	expires := now.Add(rb.TTL())
+	cfg, hostCfg := b.spec(rb, attemptID, now, expires)
 
 	created, err := b.cli.ContainerCreate(ctx, cfg, hostCfg, nil, nil, name)
 	if err != nil {
@@ -279,16 +292,46 @@ func (b *ContainerBackend) managed(ctx context.Context, all bool) ([]types.Conta
 	return list, nil
 }
 
-func (b *ContainerBackend) spec(rb Runbook, attemptID string, expires time.Time) (*container.Config, *container.HostConfig) {
+// localImageRef reduces a digest-pinned Runbook.Image ("repo@sha256:<hex>")
+// to the bare content hash for the actual ContainerCreate call. Empirically
+// verified against the real host (no code-only assumption): with no
+// registries configured, podman's short-name resolver refuses
+// "repo@sha256:<hex>" outright -- "did not resolve to an alias and no
+// unqualified-search registries are defined" -- treating the missing
+// registry hostname as something that needs registry resolution rather than
+// a local lookup, even though the image is already in local storage. A bare
+// image ID has no name component to trigger that resolution path at all and
+// runs cleanly. Validate() still requires the full "repo@sha256:<hex>" form
+// as the source of truth for the pinning invariant; only what's handed to
+// the runtime changes.
+//
+// This is the local-only-MVP answer specifically. If a registry is ever
+// added, revisit this: a fully qualified reference from a real registry
+// should very likely be passed through as-is (so policy/signature checks
+// tied to that reference apply), not reduced to a bare ID that only means
+// "whichever local image happens to have this content hash," with no
+// provenance attached.
+func localImageRef(image string) string {
+	const marker = "@sha256:"
+	if i := strings.LastIndex(image, marker); i >= 0 {
+		return image[i+len(marker):]
+	}
+	return image
+}
+
+func (b *ContainerBackend) spec(rb Runbook, attemptID string, spawnedAt, expires time.Time) (*container.Config, *container.HostConfig) {
 	labels := map[string]string{
-		LabelManaged: ManagedValue,
-		LabelAttempt: attemptID,
-		LabelRunbook: rb.Digest(),
-		LabelExpires: expires.Format(time.RFC3339),
+		LabelManaged:   ManagedValue,
+		LabelAttempt:   attemptID,
+		LabelRunbook:   rb.Digest(),
+		LabelExpires:   expires.Format(time.RFC3339),
+		LabelSpawnedAt: spawnedAt.Format(time.RFC3339),
+		LabelWeight:    strconv.Itoa(rb.EffectiveWeight()),
+		LabelDiskLimit: strconv.FormatInt(rb.EffectiveDiskLimitBytes(), 10),
 	}
 
 	cfg := &container.Config{
-		Image:        rb.Image,
+		Image:        localImageRef(rb.Image),
 		Labels:       labels,
 		WorkingDir:   rb.Workdir,
 		Tty:          false,
@@ -308,9 +351,35 @@ func (b *ContainerBackend) spec(rb Runbook, attemptID string, expires time.Time)
 			Memory:    parseMemory(rb.Memory),
 			NanoCPUs:  int64(rb.CPUs * 1e9),
 			PidsLimit: &rb.PidsLimit,
+			// CgroupParent lives on Resources, not HostConfig directly --
+			// easy to miss, the compiler will reject it at the top level of
+			// the HostConfig literal with "unknown field" if it's ever moved.
+			//
+			// Requires deploy/praxis-sbx.slice installed and started on the
+			// host -- see SandboxSlice's own comment. What happens here if
+			// that unit is NOT installed is genuinely unverified: systemd's
+			// transient-unit API often auto-vivifies an intermediate slice
+			// path on demand, in which case this degrades to "hostmon has
+			// nothing pre-existing to read yet" rather than a spawn failure
+			// -- but that is an assumption, not something confirmed against
+			// this host's actual systemd/podman versions. Deploy
+			// deploy/praxis-sbx.slice BEFORE this ships, and confirm a spawn
+			// still succeeds if it's ever missing, rather than trusting this
+			// comment.
+			CgroupParent: SandboxSlice,
 		},
 		SecurityOpt: []string{"no-new-privileges"},
 		CapDrop:     []string{"ALL"},
+		// Confirmed live and dangerous, not theoretical: without this, a
+		// container spawned through this exact code path maps its root
+		// process to host uid 1001 -- praxis-sbx itself, the account that
+		// owns the podman socket, the image store, and this orchestrator
+		// process. An escape would own everything, not nothing. Every
+		// verification this session (50-verify.sh, preflight-ticket.sh,
+		// verify-shell-isolation.sh) spawns with --userns auto explicitly;
+		// this was the one path that never did, because it never went
+		// through any of those scripts' spawn flags at all -- it has its own.
+		UsernsMode: "auto",
 	}
 
 	if rb.Systemd {

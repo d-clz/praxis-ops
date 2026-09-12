@@ -1,5 +1,10 @@
 # syntax=docker/dockerfile:1
-FROM registry.local/praxis/ops-base@sha256:REPLACE_AT_BAKE
+# Bare local name, not a registry.local@sha256 pin: no registry exists on this
+# host and policy.json doesn't even permit the docker transport a
+# registry-shaped FROM would need. bootstrap/60-build-base.sh imports the base
+# under this exact name -- podman build resolves it straight from local
+# containers-storage, no network involved.
+FROM praxis/ops-base
 
 # seed.sh runs at BUILD time. The seeded state is baked into the image so every
 # spawn is byte-identical and the fault cannot drift.

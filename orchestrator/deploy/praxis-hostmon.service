@@ -9,20 +9,23 @@
 
 [Unit]
 Description=Praxis sandbox host monitor (independent view)
-Documentation=file:///opt/praxis/docs/observability.md
 After=podman.socket
 Wants=podman.socket
 
 [Service]
 Type=simple
-ExecStart=/opt/praxis/bin/hostmon
+# %h, not /opt/praxis: that path never existed on the host (the /opt/praxis
+# under this name is inside the sandbox rootfs image, a completely different
+# filesystem) -- matches the orchestrator's own ~praxis-sbx/bin/orchestrator
+# convention instead of inventing a second one for no reason.
+ExecStart=%h/bin/hostmon
 Restart=always
 RestartSec=5s
 
 Environment=PRAXIS_HOSTMON_LISTEN=127.0.0.1:9102
 Environment=DOCKER_HOST=unix:///run/user/1001/podman/podman.sock
 Environment=PRAXIS_HOSTMON_INTERVAL=15s
-Environment=PRAXIS_SLICE_PATH=/sys/fs/cgroup/user.slice/user-1001.slice/user@1001.service/praxis-sbx.slice
+Environment=PRAXIS_SLICE_PATH=/sys/fs/cgroup/user.slice/user-1001.slice/user@1001.service/praxis.slice/praxis-sbx.slice
 Environment=PRAXIS_STORAGE_PATH=/home/praxis-sbx/.local/share/containers
 # Per-session stats cost one API call per running container per poll.
 # Turn on for benchmarking, off for steady state.

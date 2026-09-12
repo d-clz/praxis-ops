@@ -20,8 +20,32 @@ const (
 	LabelRunbook = "praxis.runbook-digest"
 	LabelExpires = "praxis.expires-at"
 
+	// LabelSpawnedAt and LabelWeight exist for internal/metrics -- see its
+	// labels.go, which must match these exactly. A container without them
+	// still parses (SpawnedAt zero, Weight defaults to 1); they were added
+	// after the ones above and older tooling should not choke on their
+	// absence.
+	LabelSpawnedAt = "praxis.spawned-at"
+	LabelWeight    = "praxis.weight"
+
+	// LabelDiskLimit stamps the container's writable-layer cap in bytes.
+	// Enforced by the reaper alongside TTL -- see reapTick in cmd/orchestrator
+	// and Runbook.EffectiveDiskLimitBytes' comment for why every container
+	// gets one of these regardless of whether the caller set DiskLimit.
+	LabelDiskLimit = "praxis.disk-limit-bytes"
+
 	ManagedValue = "praxis-orchestrator"
 	NamePrefix   = "sbx-"
+
+	// SandboxSlice is the persistent systemd slice every sandbox's cgroup
+	// nests under (container.go's spec() sets HostConfig.CgroupParent to
+	// this). Must match the [Slice] unit name in deploy/praxis-sbx.slice --
+	// that unit exists specifically so hostmon's PRAXIS_SLICE_PATH resolves
+	// to a real, always-present path (a bare --cgroup-parent string with no
+	// backing unit would vanish with the last container using it, moving the
+	// "path doesn't exist" problem to precisely the idle state hostmon is
+	// most often read during).
+	SandboxSlice = "praxis-sbx.slice"
 )
 
 var (

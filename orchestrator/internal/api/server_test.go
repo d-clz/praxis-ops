@@ -3,6 +3,7 @@ package api
 import (
 	"bufio"
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -12,8 +13,26 @@ import (
 	"testing"
 	"time"
 
+	"github.com/docker/docker/api/types"
+
+	"praxis-orchestrator/internal/metrics"
 	"praxis-orchestrator/internal/sandbox"
 )
+
+func testRegistry() *metrics.Registry { return metrics.NewRegistry("orchestrator", "test") }
+
+// fakeLister stands in for the docker client admission's CollectManaged
+// call goes through (New's lister param, used only there -- see its own
+// comment on why admission bypasses reg's cached snapshot). Empty by
+// default: most tests never call POST /instances, and the ones that do
+// want generous headroom unless they're specifically testing admission.
+type fakeLister struct {
+	containers []types.Container
+}
+
+func (f fakeLister) ContainerList(context.Context, types.ContainerListOptions) ([]types.Container, error) {
+	return f.containers, nil
+}
 
 // fakeBackend implements sandbox.Backend entirely in memory. No podman, no
 // docker socket -- that's the point: the API layer's job (auth, status
@@ -68,7 +87,7 @@ func testLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard,
 func TestAuth_RejectsMissingOrWrongToken(t *testing.T) {
 	be := newFakeBackend()
 	be.instances["a"] = sandbox.Instance{AttemptID: "a", Status: sandbox.StatusRunning}
-	ts := httptest.NewServer(New(be, Config{Token: "secret"}, testLogger()).Routes())
+	ts := httptest.NewServer(New(be, fakeLister{}, testRegistry(), Config{Token: "secret", CapacityWeight: 10}, testLogger()).Routes())
 	defer ts.Close()
 
 	for _, tok := range []string{"", "wrong"} {
@@ -90,7 +109,7 @@ func TestAuth_RejectsMissingOrWrongToken(t *testing.T) {
 func TestAuth_AllowsCorrectToken(t *testing.T) {
 	be := newFakeBackend()
 	be.instances["a"] = sandbox.Instance{AttemptID: "a", Status: sandbox.StatusRunning}
-	ts := httptest.NewServer(New(be, Config{Token: "secret"}, testLogger()).Routes())
+	ts := httptest.NewServer(New(be, fakeLister{}, testRegistry(), Config{Token: "secret", CapacityWeight: 10}, testLogger()).Routes())
 	defer ts.Close()
 
 	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/instances/a", nil)
@@ -107,7 +126,7 @@ func TestAuth_AllowsCorrectToken(t *testing.T) {
 
 func TestShell_ConflictWhenNotRunning(t *testing.T) {
 	be := newFakeBackend() // no instance registered at all
-	ts := httptest.NewServer(New(be, Config{Token: "secret"}, testLogger()).Routes())
+	ts := httptest.NewServer(New(be, fakeLister{}, testRegistry(), Config{Token: "secret", CapacityWeight: 10}, testLogger()).Routes())
 	defer ts.Close()
 
 	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/instances/nope/shell", nil)
@@ -122,6 +141,145 @@ func TestShell_ConflictWhenNotRunning(t *testing.T) {
 	}
 }
 
+// TestCreate_ClassifiesOkThenConflict exercises the classification server.go
+// derives from the Get() pre-check, since Create() itself never reports a
+// conflict as an error -- it silently returns the existing instance (see
+// container.go). A spike in "conflict" means the portal is retrying against
+// a live attempt_id, not that spawning is failing; folding it into "error"
+// would hide exactly the signal PraxisSpawnConflictSpike exists to catch.
+func TestCreate_ClassifiesOkThenConflict(t *testing.T) {
+	be := newFakeBackend()
+	ts := httptest.NewServer(New(be, fakeLister{}, testRegistry(), Config{Token: "secret", CapacityWeight: 10}, testLogger()).Routes())
+	defer ts.Close()
+
+	post := func(id string) int {
+		body := strings.NewReader(`{"attempt_id":"` + id + `","runbook":{}}`)
+		req, _ := http.NewRequest(http.MethodPost, ts.URL+"/instances", body)
+		req.Header.Set("X-Praxis-Token", "secret")
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("POST /instances: %v", err)
+		}
+		defer resp.Body.Close()
+		return resp.StatusCode
+	}
+
+	if code := post("dup-1"); code != http.StatusAccepted {
+		t.Fatalf("first create: status = %d, want 202", code)
+	}
+	if code := post("dup-1"); code != http.StatusAccepted {
+		t.Fatalf("repeat create: status = %d, want 202 (idempotent, not an error)", code)
+	}
+
+	metricsReq, _ := http.NewRequest(http.MethodGet, ts.URL+"/metrics", nil)
+	metricsReq.Header.Set("X-Praxis-Token", "secret")
+	resp, err := http.DefaultClient.Do(metricsReq)
+	if err != nil {
+		t.Fatalf("GET /metrics: %v", err)
+	}
+	defer resp.Body.Close()
+	buf := new(strings.Builder)
+	io.Copy(buf, resp.Body)
+	out := buf.String()
+
+	if !strings.Contains(out, `praxis_spawn_total{result="ok"} 1`) {
+		t.Errorf("expected exactly one result=\"ok\" spawn, got:\n%s", out)
+	}
+	if !strings.Contains(out, `praxis_spawn_total{result="conflict"} 1`) {
+		t.Errorf("expected exactly one result=\"conflict\" spawn, got:\n%s", out)
+	}
+}
+
+func TestDestroy_IncrementsExplicit(t *testing.T) {
+	be := newFakeBackend()
+	be.instances["gone"] = sandbox.Instance{AttemptID: "gone", Status: sandbox.StatusRunning}
+	ts := httptest.NewServer(New(be, fakeLister{}, testRegistry(), Config{Token: "secret", CapacityWeight: 10}, testLogger()).Routes())
+	defer ts.Close()
+
+	req, _ := http.NewRequest(http.MethodDelete, ts.URL+"/instances/gone", nil)
+	req.Header.Set("X-Praxis-Token", "secret")
+	if _, err := http.DefaultClient.Do(req); err != nil {
+		t.Fatalf("DELETE: %v", err)
+	}
+
+	metricsReq, _ := http.NewRequest(http.MethodGet, ts.URL+"/metrics", nil)
+	metricsReq.Header.Set("X-Praxis-Token", "secret")
+	resp, err := http.DefaultClient.Do(metricsReq)
+	if err != nil {
+		t.Fatalf("GET /metrics: %v", err)
+	}
+	defer resp.Body.Close()
+	buf := new(strings.Builder)
+	io.Copy(buf, resp.Body)
+	out := buf.String()
+
+	if !strings.Contains(out, `praxis_destroy_total{reason="explicit"} 1`) {
+		t.Errorf("expected reason=\"explicit\" destroy, got:\n%s", out)
+	}
+}
+
+// TestCreate_WeightedAdmission is Stage 4's actual verification: confirm a
+// spawn is genuinely rejected once the weight budget is spent, not just that
+// the metric exists. Two already-in-flight weight against a budget of 2
+// means zero headroom -- the next spawn, at the default weight of 1, must be
+// denied; a lighter budget check (weight already at 1, room for exactly 1
+// more) must be admitted. This is also the test that would catch a
+// regression back to counting containers instead of summing weight: a
+// CPT-01-weight session sitting at 2 alone should deny a next spawn a flat
+// count of 1 never would.
+func TestCreate_WeightedAdmission(t *testing.T) {
+	post := func(ts *httptest.Server, id string, weight int) int {
+		body := strings.NewReader(fmt.Sprintf(
+			`{"attempt_id":%q,"runbook":{"weight":%d}}`, id, weight))
+		req, _ := http.NewRequest(http.MethodPost, ts.URL+"/instances", body)
+		req.Header.Set("X-Praxis-Token", "secret")
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("POST /instances: %v", err)
+		}
+		defer resp.Body.Close()
+		return resp.StatusCode
+	}
+
+	t.Run("denied at zero headroom", func(t *testing.T) {
+		be := newFakeBackend()
+		lister := fakeLister{containers: []types.Container{
+			{ID: "existing", State: "running", Labels: map[string]string{
+				sandbox.LabelAttempt: "existing-1",
+				sandbox.LabelExpires: time.Now().Add(time.Hour).Format(metrics.TimeFormat),
+				sandbox.LabelWeight:  "2",
+			}},
+		}}
+		ts := httptest.NewServer(New(be, lister, testRegistry(),
+			Config{Token: "secret", CapacityWeight: 2}, testLogger()).Routes())
+		defer ts.Close()
+
+		if code := post(ts, "new-1", 1); code != http.StatusTooManyRequests {
+			t.Errorf("status = %d, want 429 (2 in flight + 1 incoming > budget of 2)", code)
+		}
+	})
+
+	t.Run("admitted with exact headroom", func(t *testing.T) {
+		be := newFakeBackend()
+		lister := fakeLister{containers: []types.Container{
+			{ID: "existing", State: "running", Labels: map[string]string{
+				sandbox.LabelAttempt: "existing-1",
+				sandbox.LabelExpires: time.Now().Add(time.Hour).Format(metrics.TimeFormat),
+				sandbox.LabelWeight:  "1",
+			}},
+		}}
+		ts := httptest.NewServer(New(be, lister, testRegistry(),
+			Config{Token: "secret", CapacityWeight: 2}, testLogger()).Routes())
+		defer ts.Close()
+
+		if code := post(ts, "new-1", 1); code != http.StatusAccepted {
+			t.Errorf("status = %d, want 202 (1 in flight + 1 incoming == budget of 2, exactly fits)", code)
+		}
+	})
+}
+
 // TestShell_RelaysBytesBothWays is the one test that actually exercises the
 // hijack + relayBytes path from Phase C -- untestable any other way without
 // a live podman daemon. net.Pipe() stands in for the container's PTY; a raw
@@ -134,7 +292,7 @@ func TestShell_RelaysBytesBothWays(t *testing.T) {
 	sandboxSide, testSide := net.Pipe()
 	be.shellConn = sandboxSide
 
-	ts := httptest.NewServer(New(be, Config{Token: "secret"}, testLogger()).Routes())
+	ts := httptest.NewServer(New(be, fakeLister{}, testRegistry(), Config{Token: "secret", CapacityWeight: 10}, testLogger()).Routes())
 	defer ts.Close()
 
 	conn, err := net.DialTimeout("tcp", ts.Listener.Addr().String(), 2*time.Second)

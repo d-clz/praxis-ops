@@ -17,20 +17,20 @@ import (
 // it on every tick; hostmon's poller writes it on its own interval. Scrapes
 // read the last one and never touch the socket.
 type Snapshot struct {
-	View      string // "orchestrator" | "host"
-	TakenAt   time.Time
-	Sessions  []Session
-	Orphans   map[OrphanKind]int
-	Total     int // every container seen, managed or not (host view)
-	Err       error
+	View     string // "orchestrator" | "host"
+	TakenAt  time.Time
+	Sessions []Session
+	Orphans  map[OrphanKind]int
+	Total    int // every container seen, managed or not (host view)
+	Err      error
 
 	// Host-view extras. Zero on the orchestrator view.
-	SliceProcs        int
-	SliceMemoryBytes  uint64
-	PressureSome      float64
-	PressureFull      float64
-	StorageFreeBytes  uint64
-	SessionStats      map[string]SessionStat // keyed by attempt_id, opt-in
+	SliceProcs       int
+	SliceMemoryBytes uint64
+	PressureSome     float64
+	PressureFull     float64
+	StorageFreeBytes uint64
+	SessionStats     map[string]SessionStat // keyed by attempt_id, opt-in
 }
 
 // SessionStat is per-session resource use. Opt-in (PRAXIS_HOSTMON_STATS=1)
@@ -90,7 +90,7 @@ func (r *Registry) IncSpawn(result string) {
 	r.mu.Unlock()
 }
 
-// IncDestroy reason is one of: ttl, explicit, error.
+// IncDestroy reason is one of: ttl, disk_limit, explicit, error.
 func (r *Registry) IncDestroy(reason string) {
 	r.mu.Lock()
 	r.destroy[reason]++

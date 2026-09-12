@@ -1,23 +1,24 @@
 # Observability — monitoring, orphan reconciliation, capacity benchmark
 
 Scope: what the orchestrator exposes, what the independent host monitor exposes,
-how the two are compared, and how `PRAXIS_MAX_CONCURRENT` stops being a guess.
+how the two are compared, and how `PRAXIS_CAPACITY_WEIGHT` (Stage 4 -- replaced
+the flat `PRAXIS_MAX_CONCURRENT`) stops being a guess.
 
 ---
 
-## Assumptions to verify before merging
+## Assumptions -- resolved against the real codebase
 
-These were inferred, not read from the codebase. Fix them in
-`internal/metrics/labels.go` if they are wrong — every file here reads from that
-one place.
+These were inferred, not read from the codebase, when this doc was written.
+All five have since been checked against what actually exists and either
+confirmed or fixed; kept here as a record, not an open question list.
 
-| Assumption | Where |
+| Assumption | Resolution |
 |---|---|
-| Label keys `praxis.attempt_id`, `praxis.runbook`, `praxis.expires_at`, `praxis.spawned_at`, `praxis.weight` | `internal/metrics/labels.go` |
-| `expires_at` / `spawned_at` serialised as RFC3339 | `labels.go:ParseSession` |
-| Docker client is v25 (`types.ContainerListOptions`, `types.Container`) | `collect.go`, `cmd/hostmon` — breaks on v26+, see note at bottom |
-| Sandbox cgroup slice path `/sys/fs/cgroup/user.slice/user-1001.slice/user@1001.service/praxis-sbx.slice` | `PRAXIS_SLICE_PATH` env, hostmon |
-| Spawn API is `POST {base}/v1/sandboxes` with `{"attempt_id","runbook"}` | `bench/staircase.sh`, all paths are env-overridable |
+| Label keys `praxis.attempt_id`, `praxis.runbook`, `praxis.expires_at`, `praxis.spawned_at`, `praxis.weight` | **Wrong** -- real keys are hyphenated (`praxis.attempt-id`, `praxis.runbook-digest`, `praxis.expires-at`). `internal/metrics/labels.go` now references `internal/sandbox`'s own constants directly instead of a second hand-copied set, so this can't drift again. |
+| `expires_at` / `spawned_at` serialised as RFC3339 | Confirmed correct. |
+| Docker client is v25 (`types.ContainerListOptions`, `types.Container`) | Confirmed -- `go.mod` pins `v25.0.5+incompatible`. Breaks on v26+, unchanged risk, see note at bottom. |
+| Sandbox cgroup slice path `/sys/fs/cgroup/user.slice/user-1001.slice/user@1001.service/praxis.slice/praxis-sbx.slice` | Now backed by a real unit: `deploy/praxis-sbx.slice`, referenced via `internal/sandbox.SandboxSlice` and set as every spawned container's `CgroupParent`. Previously just an env default with nothing creating the path. |
+| Spawn API is `POST {base}/v1/sandboxes` with `{"attempt_id","runbook"}` | **Wrong** -- real route is `POST {base}/instances` (port 8081, not 9100), auth is `X-Praxis-Token` not `Authorization: Bearer`, and `runbook` must be a fully inlined `Runbook` object, not a name (the orchestrator has no concept of a named runbook -- see `main.go`'s "knows nothing about tickets"). `bench/staircase.sh` now builds that object itself from the target ticket's own `scenario.yaml`. |
 
 ---
 
@@ -33,7 +34,7 @@ and fail independently.
   praxis-orchestrator.service           praxis-hostmon.service
   lists WITH label filter               lists ALL containers, no filter
   what the reaper can actually see      ground truth from the socket
-  :9101/metrics                         :9102/metrics
+  :8081/metrics (authed)                :9102/metrics (no auth)
 ```
 
 Set algebra, evaluated in Prometheus rather than in either process:
@@ -59,7 +60,7 @@ still the thing that tells you.
 Both exporters emit a `praxis_build_info` and a `praxis_scrape_error` so a dead
 collector is distinguishable from a genuine zero.
 
-### Orchestrator — `:9101/metrics`
+### Orchestrator — `:8081/metrics` (same authenticated listener as the rest of the API, not a separate port -- `docs/observability-wiring.md` §4 is explicit that metrics belong on the existing loopback API, and `internal/api/server.go`'s `Routes()` follows that: `/metrics`/`/sessions` sit in the same mux as `/instances`, behind the same `X-Praxis-Token`)
 
 ```
 praxis_sessions_current{view="orchestrator",state="created|running|exited"}
@@ -92,9 +93,9 @@ praxis_scrape_error{view="host"}
 ```
 
 **Cardinality.** No metric carries `attempt_id` except the two opt-in
-`praxis_session_*` gauges, which are off by default and bounded by
-`PRAXIS_MAX_CONCURRENT` anyway. Per-session detail for humans lives on
-`/sessions` (JSON), not in the metric namespace.
+`praxis_session_*` gauges, which are off by default and bounded by the
+number of concurrent sessions `PRAXIS_CAPACITY_WEIGHT` admits anyway. Per-session
+detail for humans lives on `/sessions` (JSON), not in the metric namespace.
 
 **Cost.** Both exporters cache. The orchestrator's snapshot is written by the
 reaper tick — one list call serves both reaping and metrics, so scraping adds
@@ -130,7 +131,7 @@ everything.
 
 ## 4. Capacity benchmark
 
-`bench/staircase.sh`. Replaces `PRAXIS_MAX_CONCURRENT=2` with a measured number.
+`bench/staircase.sh`. Replaces the guessed `PRAXIS_CAPACITY_WEIGHT=2` with a measured number.
 
 Method: spawn one weight-unit at a time, hold for `SOAK` seconds, sample, step
 up. Abort on the first stop condition. Report the last step that held.
@@ -143,7 +144,7 @@ Stop conditions, checked every 5s:
 | any OOM kill on the box | any | `memory.events` / dmesg |
 | loop volume free | < 20% | writable layers; silent killer |
 | spawn p95 latency | > 20s | admission, not steady state |
-| GitLab health probe | fails | the neighbour's SLO is a stop condition |
+| neighbour health probe | fails | the neighbour's SLO is a stop condition |
 
 Two numbers come out, and they are different limits:
 

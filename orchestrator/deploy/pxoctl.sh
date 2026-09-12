@@ -1,13 +1,18 @@
 #!/usr/bin/env bash
-# pxoctl.sh -- day-2 operations for praxis-orchestrator, in two layers:
+# pxoctl.sh -- day-2 operations for praxis-orchestrator and praxis-hostmon:
 #
-#   unit <cmd>   infrastructure: is the process even alive (systemd --user,
-#                inside praxis-sbx's own lingering instance)
-#   api  <cmd>   API: is it actually answering requests correctly
+#   unit    <cmd>   orchestrator infrastructure: is the process even alive
+#   api     <cmd>   orchestrator API: is it actually answering correctly
+#   hostmon <cmd>   the independent second view -- its own unit, its own
+#                    unauthenticated :9102/healthz
 #
-# Check unit first. A systemd unit reporting failed doesn't need an API probe
-# to explain itself, and one reporting active(running) can still be wedged or
-# answering wrong -- that's what api is for.
+# Check unit before api: a systemd unit reporting failed doesn't need an API
+# probe to explain itself, and one reporting active(running) can still be
+# wedged or answering wrong -- that's what api is for. hostmon is checked
+# separately, deliberately: its own .service header is explicit that its
+# whole value is staying in a failure domain independent of the
+# orchestrator's, so this script keeps that boundary rather than folding it
+# into `unit`/`api` for cosmetic symmetry.
 #
 # Never self-elevates. A subcommand that needs root says so, plainly, and
 # exits -- deciding to re-run under sudo is always yours, not this script's.
@@ -17,13 +22,15 @@ SBX_USER="${SBX_USER:-praxis-sbx}"
 UNIT="praxis-orchestrator"
 BASE="${PRAXIS_API_BASE:-http://127.0.0.1:8081}"
 ENV_FILE="$(getent passwd "$SBX_USER" 2>/dev/null | cut -d: -f6)/.config/praxis/orchestrator.env"
+HOSTMON_UNIT="praxis-hostmon"
+HOSTMON_BASE="${PRAXIS_HOSTMON_BASE:-http://127.0.0.1:9102}"
 
 usage() {
   cat <<EOF
 usage: $0 <group> <command> [args]
 
-unit -- infrastructure layer (needs root; runs inside praxis-sbx's own
-        systemd --user instance)
+unit -- orchestrator infrastructure (needs root; runs inside praxis-sbx's
+        own systemd --user instance)
   unit status            unit status (active/failed, log tail, restart count)
   unit logs [N]          last N journal lines, default 50
   unit logs -f           follow the journal live
@@ -31,15 +38,23 @@ unit -- infrastructure layer (needs root; runs inside praxis-sbx's own
   unit enable            enable at boot and start now (first-time activation)
   unit disable           disable at boot (does not stop a running unit)
 
-api -- API layer (mostly does NOT need root)
+api -- orchestrator API (mostly does NOT need root)
   api health             GET /healthz -- no token, no root
   api get <attempt_id>   GET /instances/<attempt_id> -- needs the shared
                          token (export PRAXIS_ORCH_TOKEN yourself, or run as
                          root to read it from praxis-sbx's own env file)
 
+hostmon -- the independent second view (praxis-hostmon.service). Same
+           status/logs/start/stop/restart/enable/disable as unit (needs
+           root), plus:
+  hostmon health          GET :9102/healthz -- no token, no root; hostmon has
+                          no auth concept at all, by design (read-only,
+                          loopback-only)
+
 Check unit before api: a failed unit doesn't need an API probe to explain
 itself, and a running one can still be wedged or answering wrong -- that's
-what api is for.
+what api is for. hostmon is meant to keep working when unit/api don't --
+check it independently, not as a substitute for the other two.
 EOF
   exit "${1:-1}"
 }
@@ -124,6 +139,43 @@ case "$group" in
         ;;
       *)
         echo "unknown api command: $cmd" >&2
+        usage 1
+        ;;
+    esac
+    ;;
+  hostmon)
+    [[ -z "$cmd" ]] && usage 1
+    case "$cmd" in
+      health)
+        curl -sf "$HOSTMON_BASE/healthz" && echo \
+          || { echo "unreachable -- check: sudo $0 hostmon status" >&2; exit 1; }
+        ;;
+      status)
+        need_root "hostmon status"
+        as_sbx systemctl --user status "$HOSTMON_UNIT"
+        ;;
+      logs)
+        need_root "hostmon logs"
+        if [[ "${3:-}" == "-f" ]]; then
+          as_sbx journalctl --user -u "$HOSTMON_UNIT" -f
+        else
+          as_sbx journalctl --user -u "$HOSTMON_UNIT" -n "${3:-50}" --no-pager
+        fi
+        ;;
+      start|stop|restart)
+        need_root "hostmon $cmd"
+        as_sbx systemctl --user "$cmd" "$HOSTMON_UNIT"
+        ;;
+      enable)
+        need_root "hostmon enable"
+        as_sbx systemctl --user enable --now "$HOSTMON_UNIT"
+        ;;
+      disable)
+        need_root "hostmon disable"
+        as_sbx systemctl --user disable "$HOSTMON_UNIT"
+        ;;
+      *)
+        echo "unknown hostmon command: $cmd" >&2
         usage 1
         ;;
     esac

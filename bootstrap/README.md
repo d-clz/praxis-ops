@@ -169,3 +169,27 @@ user with `podman build`.
 - any nftables change
 - a podman upgrade
 - granting a new capability to any ticket tier
+
+## Emergency storage reset (`90`) -- NOT a maintenance tool
+
+`90-storage-reset-rebuild.sh` revokes and reinitializes: `podman system
+reset` (every image, every container, podman's whole local database), then
+rebuilds from source. There is no partial/periodic mode -- this is a
+last-resort recovery procedure, not something to schedule or run casually.
+
+Why it exists: on this podman version, every `--userns=auto` spawn leaks a
+full, untracked copy of whatever base layer it used, and `podman rm` never
+reclaims it -- confirmed live, ~19GB of orphaned directories survived even
+with zero containers running. No config fixes this; it's an
+unresolved-upstream podman/containers-storage defect. A real fix -- a
+periodic pruner that safely reclaims just the orphaned layers, or a
+targeted per-`Destroy()` cleanup in the orchestrator -- is real, deferred
+work (`ROADMAP.md`, MVP2 scope), not this script. Full writeup and what NOT
+to run instead (`podman save`, `system check`, `system migrate` all made
+it worse): `docs/capacity-benchmark.md`, "Known host constraint".
+
+Refuses to run against a live session. Triggered manually by watching
+hostmon's `praxis_storage_free_bytes` (`:9102/metrics`, no auth) drop
+uncomfortably low -- deliberately not cron'd or auto-triggered: storage
+operations on this host have already produced two unpredictable surprises,
+so a human stays fully in the loop, every time.

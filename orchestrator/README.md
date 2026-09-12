@@ -74,22 +74,32 @@ Day-2 operations go through `pxoctl` (`deploy/pxoctl.sh`, installed to
 sudo pxoctl unit status|logs|start|stop|restart   # is the process alive
 pxoctl api health                                  # is it answering correctly
 sudo pxoctl api get <attempt_id>
+sudo pxoctl hostmon status                         # the independent second view
+pxoctl hostmon health
 ```
 
 Check `unit` before `api` -- a failed unit doesn't need an API probe to
 explain itself, and a running one can still be wedged or answering wrong.
-Full detail in `deploy/README.md`.
+`hostmon` (`internal/metrics`, `cmd/hostmon`, deployed separately via
+`make deploy-hostmon`) is checked independently of both, on purpose --
+staying in its own failure domain is the entire reason it exists. Full
+detail in `deploy/README.md`.
 
 ## Layout
 
 ```
 cmd/orchestrator/     main() -- wiring only, not unit tested on purpose
+cmd/hostmon/           the independent second view: reads the podman socket
+                        directly, never calls the orchestrator, never imports
+                        internal/sandbox
 internal/sandbox/      Runbook, the Backend interface, the podman-backed
                         implementation (Create/Destroy/Reap/ExecScript/
                         ExecShell)
 internal/api/          HTTP surface: auth, routing, the exec/shell handlers
-deploy/                .service unit, README, pxoctl, this module's Makefile
-                        targets that touch praxis-sbx
+internal/metrics/      shared by both binaries -- label parsing, the
+                        Prometheus-format registry, orphan classification
+deploy/                .service units, README, pxoctl, this module's
+                        Makefile targets that touch praxis-sbx
 ```
 
 `internal/sandbox.Backend` is the seam the whole design leans on: `internal/

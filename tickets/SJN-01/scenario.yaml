@@ -1,7 +1,7 @@
 # SJN-01 -- Ops substrate, star 3. Discovery: find the actor.
 id: SJN-01
 substrate_class: ops
-substrate_image: registry.local/praxis/ops-base@sha256:REPLACE_AT_BAKE
+substrate_image: praxis/sjn-01@sha256:31a20c681c9fb7ff6abd60f206d5c8f02904bc27f96b461028d5fa4045925bd4
 family: process-forensics
 star: 3
 delivery: live_sandbox
@@ -16,10 +16,19 @@ runtime:
   root_in_sandbox: true
   network: none
   memory: 512m
+  disk_limit: 256m
   cpus: "1.0"
   pids_limit: 256
   ttl_seconds: 3600
   read_only: false
+  # container.go's spec() ALWAYS sets Cmd (Entrypoint if set, else a
+  # hardcoded "sleep infinity" fallback) -- Cmd on create always overrides
+  # an image's own baked CMD, standard Docker semantics. Without this, every
+  # real spawn of this ticket silently ran sleep infinity instead of
+  # entrypoint.sh, and the planted writer process never ran at all. Found
+  # via a real spawn through the orchestrator, not review -- the log's line
+  # count didn't move between two reads two seconds apart.
+  entrypoint: ["/opt/praxis/entrypoint.sh"]
 
 detect:
   - the process appending to /var/log/app/service.log is no longer running

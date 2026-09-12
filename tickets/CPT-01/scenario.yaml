@@ -1,7 +1,7 @@
 # CPT-01 -- Ops substrate, star 4. Layered service repair. Requires systemd.
 id: CPT-01
 substrate_class: ops
-substrate_image: registry.local/praxis/ops-systemd@sha256:REPLACE_AT_BAKE
+substrate_image: praxis/cpt-01@sha256:5966484110495921be550c322b4dc144a7391664b2eb79c878ee937b9e9d2115
 family: service-repair
 star: 4
 delivery: live_sandbox
@@ -18,6 +18,7 @@ runtime:
   root_in_sandbox: true
   network: none
   memory: 768m
+  disk_limit: 512m
   cpus: "1.0"
   pids_limit: 384
   ttl_seconds: 3600

@@ -12,23 +12,34 @@ import (
 	"net/http"
 	"time"
 
+	"praxis-orchestrator/internal/metrics"
 	"praxis-orchestrator/internal/sandbox"
 )
 
 type Config struct {
-	Token         string
-	MaxConcurrent int
-	ExecTimeout   time.Duration
+	Token          string
+	CapacityWeight int
+	ExecTimeout    time.Duration
 }
 
 type Server struct {
 	backend sandbox.Backend
+	lister  metrics.Lister
+	reg     *metrics.Registry
 	cfg     Config
 	log     *slog.Logger
 }
 
-func New(b sandbox.Backend, cfg Config, log *slog.Logger) *Server {
-	return &Server{backend: b, cfg: cfg, log: log}
+// lister is used ONLY for the admission check in create(), and deliberately
+// bypasses reg's cached snapshot to do it: reg is written once per
+// PRAXIS_REAP_INTERVAL (30s default -- see cmd/orchestrator/main.go's
+// reaper), which is fine for /metrics (a scrape reading a few-seconds-stale
+// gauge is normal) but not for a load-bearing admission gate, where up to
+// 30s of under-counted weight would mean genuine over-admission. One extra
+// list call per spawn request is a reasonable price for a check that only
+// runs on spawns, not on every scrape.
+func New(b sandbox.Backend, lister metrics.Lister, reg *metrics.Registry, cfg Config, log *slog.Logger) *Server {
+	return &Server{backend: b, lister: lister, reg: reg, cfg: cfg, log: log}
 }
 
 func (s *Server) Routes() http.Handler {
@@ -40,6 +51,10 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("POST /instances/{attemptID}/exec", s.auth(http.HandlerFunc(s.exec)))
 	mux.Handle("POST /instances/{attemptID}/shell", s.auth(http.HandlerFunc(s.shell)))
 	mux.Handle("POST /reap", s.auth(http.HandlerFunc(s.reap)))
+	// Same auth as everything but /healthz -- /sessions carries attempt_id,
+	// which deserves the same protection as GET /instances/{id}.
+	mux.Handle("GET /metrics", s.auth(metrics.Handler(s.reg)))
+	mux.Handle("GET /sessions", s.auth(metrics.SessionsHandler(s.reg)))
 	return mux
 }
 
@@ -76,6 +91,13 @@ func (s *Server) healthz(w http.ResponseWriter, r *http.Request) {
 // create treats attempt_id as the idempotency key. A repeat call returns the
 // first instance rather than spawning a second one -- that is what makes a
 // portal timeout or retry safe.
+//
+// Spawn outcomes are classified ok/conflict/denied_capacity/error for
+// internal/metrics. Note this classification happens here, in the handler,
+// not inside Create() itself: Create() silently absorbs a name collision
+// into a successful Get()-based return (see container.go) rather than
+// surfacing it as an error, so "conflict" can only be known from the Get()
+// pre-check already done below, before Create() is ever called.
 func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 	var req createReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -83,16 +105,27 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, err := s.backend.Get(r.Context(), req.AttemptID); errors.Is(err, sandbox.ErrNotFound) {
-		// Only a genuinely new instance consumes a slot. On one box the budget
-		// guard is load bearing, not defensive: a leaked instance is a
-		// meaningful fraction of total capacity.
-		n, cErr := s.backend.CountRunning(r.Context())
-		if cErr != nil {
-			writeErr(w, http.StatusServiceUnavailable, cErr.Error())
+	_, getErr := s.backend.Get(r.Context(), req.AttemptID)
+	isNew := errors.Is(getErr, sandbox.ErrNotFound)
+
+	if isNew {
+		// Only a genuinely new instance consumes budget. On one box the
+		// admission guard is load bearing, not defensive: a leaked instance is
+		// a meaningful fraction of total capacity. Weight, not a flat count --
+		// CPT-01 (systemd + nginx + three faults) is several times SKN-01
+		// (files and grep), and a flat count under-admits a light mix and
+		// over-admits a heavy one. A live CollectManaged, not reg's cached
+		// snapshot -- see the comment on lister in New().
+		snap := metrics.CollectManaged(r.Context(), s.lister)
+		if snap.Err != nil {
+			s.reg.IncSpawn("error")
+			writeErr(w, http.StatusServiceUnavailable, snap.Err.Error())
 			return
 		}
-		if n >= s.cfg.MaxConcurrent {
+		used := metrics.WeightInFlight(snap)
+		incoming := req.Runbook.EffectiveWeight()
+		if used+incoming > s.cfg.CapacityWeight {
+			s.reg.IncSpawn("denied_capacity")
 			writeErr(w, http.StatusTooManyRequests, "at capacity")
 			return
 		}
@@ -100,6 +133,7 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 
 	inst, err := s.backend.Create(r.Context(), req.AttemptID, req.Runbook)
 	if err != nil {
+		s.reg.IncSpawn("error")
 		switch {
 		case errors.Is(err, sandbox.ErrInvalidRunbook), errors.Is(err, sandbox.ErrInvalidAttemptID):
 			writeErr(w, http.StatusBadRequest, err.Error())
@@ -108,6 +142,14 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusInternalServerError, "spawn failed")
 		}
 		return
+	}
+
+	if isNew {
+		s.reg.IncSpawn("ok")
+	} else {
+		// Idempotency hit, not a failure -- a spike here means the portal is
+		// retrying against a live attempt_id, not that spawning failed.
+		s.reg.IncSpawn("conflict")
 	}
 	writeJSON(w, http.StatusAccepted, inst)
 }
@@ -129,8 +171,12 @@ func (s *Server) destroy(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("attemptID")
 	ok, err := s.backend.Destroy(r.Context(), id)
 	if err != nil {
+		s.reg.IncDestroy("error")
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
+	}
+	if ok {
+		s.reg.IncDestroy("explicit")
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"attempt_id": id, "destroyed": ok})
 }
@@ -258,11 +304,21 @@ func relayBytes(portal, term io.ReadWriteCloser) {
 	<-done
 }
 
+// reap is the manual, on-demand trigger -- an operator poking it, not the
+// automatic background path. The automatic one (cmd/orchestrator/main.go's
+// tick) does not call this; it derives its own expiry decision from the same
+// metrics.CollectManaged snapshot it publishes, so there is exactly one
+// codepath computing "is this expired" for the automatic case. This handler
+// keeps Backend.Reap()'s own independent implementation for manual use, a
+// known, accepted duplication rather than a refactor in scope here.
 func (s *Server) reap(w http.ResponseWriter, r *http.Request) {
 	killed, err := s.backend.Reap(r.Context())
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	for range killed {
+		s.reg.IncDestroy("ttl")
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"reaped": killed})
 }

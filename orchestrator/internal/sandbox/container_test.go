@@ -38,3 +38,21 @@ func TestNetworkMode(t *testing.T) {
 		t.Errorf("two different attempts got the same network mode (%q) -- not per-attempt", a)
 	}
 }
+
+// TestLocalImageRef pins down the empirical host finding: podman's
+// short-name resolver refuses "repo@sha256:<hex>" with no registries
+// configured, but a bare image ID resolves cleanly. If this test starts
+// failing because someone "simplified" localImageRef, that regression is
+// real -- it would silently break every spawn on a from-scratch host.
+func TestLocalImageRef(t *testing.T) {
+	cases := map[string]string{
+		"praxis/ops-base@sha256:b5c874e5520c9014": "b5c874e5520c9014",
+		"registry.local/x/y@sha256:deadbeef":      "deadbeef",
+		"no-digest-at-all":                        "no-digest-at-all", // pass through, Validate() would have rejected this earlier
+	}
+	for in, want := range cases {
+		if got := localImageRef(in); got != want {
+			t.Errorf("localImageRef(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
