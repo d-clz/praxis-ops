@@ -5,8 +5,9 @@ Written before any frontend code exists, same discipline
 Done comes first, not after. Architecture decisions (WebSocket library,
 where it's served from, token handling) are resolved in
 `docs/session-03-plan.md`; this document is the functional contract for
-what gets built against that architecture — `orchestrator/openapi.yaml` is
-the API contract, this is the dashboard's own.
+what gets built against that architecture —
+`internal/dashboard/static/openapi.yaml` is the API contract, this is the
+dashboard's own.
 
 ## Scope
 
@@ -51,15 +52,21 @@ Each one is checkable by a person actually doing it, not a vibe:
    indicates the shell has disconnected — it does not sit silently as if
    still connected.
 6. **The dashboard makes no undocumented API calls.** Every request it
-   sends is one already described in `orchestrator/openapi.yaml`. If a new
-   endpoint (like `GET /dashboard/summary`) is needed, the spec is updated
-   first, not discovered by reading the frontend's fetch calls.
+   sends is one already described in the OpenAPI spec. If a new endpoint
+   (like `GET /dashboard/summary`) is needed, the spec is updated first,
+   not discovered by reading the frontend's fetch calls.
 7. **No token ever appears in a URL, browser history entry, or
    `Referer` header.** The one exception permitted by design is the
    WebSocket handshake's `Sec-WebSocket-Protocol` value, per
    `docs/session-03-plan.md`'s resolved decision — checked by inspecting
    real network traffic during manual verification, not assumed from the
    code alone.
+8. **The API contract is discoverable from the running server itself, not
+   only from the repo.** `GET /ui/openapi.yaml` (raw) and
+   `GET /ui/api-docs.html` (rendered, via a vendored Redoc bundle — no
+   external fetch) are both unauthenticated and linked from the login
+   page, so someone evaluating whether to integrate doesn't need a token
+   or git access first.
 
 ## Tracked metrics / data points
 

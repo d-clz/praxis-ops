@@ -37,7 +37,7 @@ Built and verified for real against a running `cmd/mockorchestrator` in an
 actual browser — login, session list, capacity, and a real xterm.js
 terminal round-tripping keystrokes through a real WebSocket, not just
 built to spec. Full functional contract: `docs/dashboard-spec.md`. Also
-folded into this pass, "for integration ready": `orchestrator/openapi.yaml`
+folded into this pass, "for integration ready": `internal/dashboard/static/openapi.yaml`
 (the real API contract, written first) and `cmd/mockorchestrator` +
 `internal/mockbackend` (a real, runnable, no-podman stand-in for a portal/
 dashboard developer to build against).

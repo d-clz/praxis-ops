@@ -165,7 +165,7 @@ func SessionsHandler(r *Registry) http.Handler {
 
 // DashboardSummaryHandler restates capacity_weight_used/_limit and a
 // session count as JSON -- the operator dashboard's own convenience
-// endpoint (orchestrator/openapi.yaml, docs/dashboard-spec.md), not a new
+// endpoint (internal/dashboard/static/openapi.yaml, docs/dashboard-spec.md), not a new
 // data source. Parsing the Prometheus text format in JS for two numbers
 // already available structured here is unnecessary. Same staleness as
 // /metrics and /sessions: capacity_used/capacity_limit and the session

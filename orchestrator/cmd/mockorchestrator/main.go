@@ -4,7 +4,7 @@
 // real container runtime.
 //
 // For a portal or dashboard developer to build against a real, running
-// instance of the real API contract (orchestrator/openapi.yaml) with zero
+// instance of the real API contract (internal/dashboard/static/openapi.yaml) with zero
 // podman/host/root requirement, on any machine. Not a test -- a real
 // binary meant to be run, e.g. `go run ./cmd/mockorchestrator`.
 package main

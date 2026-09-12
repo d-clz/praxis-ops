@@ -68,7 +68,7 @@ into `main` closes this phase.
 - **Operator dashboard + browser shell.** Branch `operator-dashboard`, off
   `main` per this doc's own earlier instruction. Scoped in
   `docs/session-03-plan.md`, functional contract in
-  `docs/dashboard-spec.md`, API contract in `orchestrator/openapi.yaml`.
+  `docs/dashboard-spec.md`, API contract in `internal/dashboard/static/openapi.yaml`.
   Five stages, all real-verified (not just built): the API contract
   written first; a real RFC 6455 WebSocket shell (`GET
   .../shell/ws`, `github.com/coder/websocket` — this project's first new
