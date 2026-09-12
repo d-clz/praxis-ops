@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Praxis Operator Dashboard</title>
+<link rel="stylesheet" href="vendor/xterm.css">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<section id="login">
+  <h1>Praxis Operator Dashboard</h1>
+  <p>Same shared token every <code>curl</code>/<code>pxoctl</code> call uses.</p>
+  <form id="login-form">
+    <input type="password" id="token-input" placeholder="X-Praxis-Token" autocomplete="off" required>
+    <button type="submit">Log in</button>
+  </form>
+  <p id="login-error" class="error" hidden></p>
+</section>
+
+<section id="dashboard" hidden>
+  <header>
+    <h1>Praxis Operator Dashboard</h1>
+    <div id="capacity">capacity: <span id="capacity-used">-</span> / <span id="capacity-limit">-</span></div>
+    <div id="staleness">
+      auto-refreshing every <span id="poll-interval-s"></span>s -- data as of <span id="taken-at">-</span>
+    </div>
+    <button id="logout">Log out</button>
+  </header>
+
+  <div id="body">
+    <div id="sessions-panel">
+      <h2>Sessions (<span id="session-count">0</span>)</h2>
+      <table id="sessions-table">
+        <thead>
+          <tr><th>attempt_id</th><th>state</th><th>weight</th><th>expires in</th></tr>
+        </thead>
+        <tbody id="sessions-tbody"></tbody>
+      </table>
+      <p id="orphans-note"></p>
+    </div>
+
+    <div id="shell-panel" hidden>
+      <div id="shell-header">
+        <span id="shell-title"></span>
+        <label>user: <input type="text" id="shell-user" value="candidate" size="10"></label>
+        <button id="shell-reconnect">reconnect</button>
+        <button id="shell-close">close</button>
+      </div>
+      <div id="shell-disconnected" hidden>disconnected</div>
+      <div id="terminal"></div>
+    </div>
+  </div>
+</section>
+
+<script src="vendor/xterm.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

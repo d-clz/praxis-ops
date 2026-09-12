@@ -63,6 +63,11 @@ func (s *Server) Routes() http.Handler {
 	// which deserves the same protection as GET /instances/{id}.
 	mux.Handle("GET /metrics", s.auth(metrics.Handler(s.reg)))
 	mux.Handle("GET /sessions", s.auth(metrics.SessionsHandler(s.reg)))
+	// The operator dashboard's own convenience endpoint (docs/dashboard-
+	// spec.md) -- same auth, same underlying snapshot as /sessions and
+	// /metrics, just restated as two numbers instead of a full session
+	// list or Prometheus text.
+	mux.Handle("GET /dashboard/summary", s.auth(metrics.DashboardSummaryHandler(s.reg)))
 	return mux
 }
 

@@ -162,3 +162,27 @@ func SessionsHandler(r *Registry) http.Handler {
 		})
 	})
 }
+
+// DashboardSummaryHandler restates capacity_weight_used/_limit and a
+// session count as JSON -- the operator dashboard's own convenience
+// endpoint (orchestrator/openapi.yaml, docs/dashboard-spec.md), not a new
+// data source. Parsing the Prometheus text format in JS for two numbers
+// already available structured here is unnecessary. Same staleness as
+// /metrics and /sessions: capacity_used/capacity_limit and the session
+// count are set together each reap tick (SetSnapshot then SetCapacity in
+// cmd/orchestrator's reapTick), not recomputed live per request.
+func DashboardSummaryHandler(r *Registry) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		r.mu.RLock()
+		snap := r.snap
+		used, limit := r.capacityUsed, r.capacityLimit
+		r.mu.RUnlock()
+
+		writeJSON(w, map[string]any{
+			"capacity_used":  used,
+			"capacity_limit": limit,
+			"session_count":  len(snap.Sessions),
+			"taken_at":       snap.TakenAt.Format(TimeFormat),
+		})
+	})
+}

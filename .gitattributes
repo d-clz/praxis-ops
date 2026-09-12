@@ -6,3 +6,9 @@
 *.service text eol=lf
 Makefile text eol=lf
 *.go text eol=lf
+
+# Vendored, unedited-by-us third-party assets -- byte-exact fidelity matters
+# (xterm.js is a single ~488KB minified line; CRLF conversion on core.
+# autocrlf=true would silently corrupt it rather than error loudly).
+# Explicit -text, not relying on git's own binary-detection heuristic.
+orchestrator/internal/dashboard/static/vendor/* -text

@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"praxis-orchestrator/internal/api"
+	"praxis-orchestrator/internal/dashboard"
 	"praxis-orchestrator/internal/metrics"
 	"praxis-orchestrator/internal/sandbox"
 )
@@ -66,11 +67,35 @@ func main() {
 	// does its own live list rather than reading reg's cached snapshot.
 	lister := backend.RawClient()
 
+	apiRoutes := api.New(backend, lister, reg, api.Config{
+		Token: token, CapacityWeight: capacityWeight, ExecTimeout: execTimeout,
+	}, log).Routes()
+
+	// The operator dashboard's static frontend, mounted at /ui/ -- not
+	// /dashboard/, which would (as a ServeMux subtree pattern) swallow the
+	// API's own GET /dashboard/summary before this outer mux ever handed
+	// the request to apiRoutes. See internal/dashboard's own header
+	// comment for the full reasoning.
+	dashboardRoutes, err := dashboard.Handler("/ui/")
+	if err != nil {
+		log.Error("dashboard asset init failed", "err", err)
+		os.Exit(1)
+	}
+
+	mux := http.NewServeMux()
+	mux.Handle("/", apiRoutes)
+	mux.Handle("/ui/", dashboardRoutes)
+	// "/{$}" (Go 1.22+ ServeMux syntax) matches ONLY the exact root path,
+	// not every path as "/" alone would -- more specific than apiRoutes'
+	// own "/" registration above, so this wins for a bare visit to the
+	// orchestrator's URL without shadowing any real API route.
+	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/ui/", http.StatusFound)
+	})
+
 	srv := &http.Server{
-		Addr: addr,
-		Handler: api.New(backend, lister, reg, api.Config{
-			Token: token, CapacityWeight: capacityWeight, ExecTimeout: execTimeout,
-		}, log).Routes(),
+		Addr:              addr,
+		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 

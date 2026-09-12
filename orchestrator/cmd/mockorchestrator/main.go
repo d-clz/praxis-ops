@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"praxis-orchestrator/internal/api"
+	"praxis-orchestrator/internal/dashboard"
 	"praxis-orchestrator/internal/metrics"
 	"praxis-orchestrator/internal/mockbackend"
 )
@@ -50,11 +51,31 @@ func main() {
 	// the same real check, not just re-reading the code.
 	reg := metrics.NewRegistry("orchestrator", "dev")
 
+	apiRoutes := api.New(backend, backend, reg, api.Config{
+		Token: token, CapacityWeight: capacityWeight, ExecTimeout: execTimeout,
+	}, log).Routes()
+
+	// Same dashboard, same reasoning for /ui/ over /dashboard/ as
+	// cmd/orchestrator -- mounted here too so a dashboard developer can
+	// point their browser at the mock directly, not just curl/websocket
+	// clients.
+	dashboardRoutes, err := dashboard.Handler("/ui/")
+	if err != nil {
+		log.Error("dashboard asset init failed", "err", err)
+		os.Exit(1)
+	}
+
+	mux := http.NewServeMux()
+	mux.Handle("/", apiRoutes)
+	mux.Handle("/ui/", dashboardRoutes)
+	// Same convenience redirect as cmd/orchestrator -- see its comment.
+	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/ui/", http.StatusFound)
+	})
+
 	srv := &http.Server{
-		Addr: addr,
-		Handler: api.New(backend, backend, reg, api.Config{
-			Token: token, CapacityWeight: capacityWeight, ExecTimeout: execTimeout,
-		}, log).Routes(),
+		Addr:              addr,
+		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
