@@ -95,6 +95,12 @@ into `main` closes this phase.
     independent view is not surfaced here — see `docs/dashboard-spec.md`'s
     Non-goals for why folding it in would undermine the two-view model's
     whole point.
+  - **Re-verified 2026-09-12 against the real production orchestrator**,
+    not just `cmd/mockorchestrator` — a real SJN-01 spawn, a real
+    interactive shell confirming every planted process (`cache-warmer`,
+    `log-monitor`, `audit-writer`) genuinely running, and a real destroy
+    correctly surfacing the disconnect banner. No bugs found this pass;
+    full writeup with screenshots: `docs/dashboard-verification-report.md`.
 
 ## In flight / keep an eye on
 
