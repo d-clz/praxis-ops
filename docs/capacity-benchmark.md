@@ -202,7 +202,7 @@ run specifically to make a pre-repair backup:
 **The only operation validated as safe here: `podman system reset`**,
 which wipes both the files and podman's own database consistently, rather
 than trusting any surgical/partial operation to know what's safe to touch.
-See `bootstrap/90-storage-maintenance.sh` — a scripted reset-and-rebuild,
+See `bootstrap/90-storage-reset-rebuild.sh` — a scripted reset-and-rebuild,
 refusing to run against a live session, restoring from source
 (`bootstrap/60-build-base.sh`, `61-build-systemd-base.sh`, each ticket's
 `Containerfile`/`seed.sh`) rather than from any backup. **Do not run
@@ -210,7 +210,7 @@ refusing to run against a live session, restoring from source
 that script's own controlled use** — diagnose disk/image state with `df`,
 `du`, `podman ps -a`, and `podman inspect` on a specific known ID instead.
 
-**Run and validated for real, 2026-09-11/12**: `bootstrap/90-storage-maintenance.sh`
+**Run and validated for real, 2026-09-11/12**: `bootstrap/90-storage-reset-rebuild.sh`
 reclaimed **18,426MB** (25GB volume: 19GB used / 82% → 815MB used / 4%),
 confirming the entire ~19GB really was the leak, not legitimate content.
 Both base images and both ticket images rebuilt clean; containment

@@ -1,25 +1,36 @@
 #!/usr/bin/env bash
-# 90-storage-maintenance.sh -- full reset-and-rebuild of praxis-sbx's podman
-# storage. Run as root. NOT idempotent-safe to interrupt: this stops the
-# orchestrator, destroys ALL local image/container state, and rebuilds the
-# four real images from source. Needs a genuine maintenance window -- refuses
-# to run while any session is live.
+# 90-storage-reset-rebuild.sh -- EMERGENCY FULL RESET of praxis-sbx's podman
+# storage. Run as root.
 #
-# Why this exists (full incident writeup: docs/capacity-benchmark.md, "Known
-# host constraint"): podman's rootless --userns=auto "ID-mapped copy of
-# layer" mechanism, on this podman version, does not behave as a lightweight
-# share -- every container spawn leaves behind a full, untracked physical
-# copy of whatever base layer it used, and `podman rm` never reclaims it.
-# Confirmed live: after every container was destroyed and `podman ps -a`
-# came back empty, ~19GB of orphaned overlay directories remained on disk.
-# This is a real, permanent leak from NORMAL orchestrator operation -- every
-# candidate session leaks one of these, forever, regardless of TTL or
-# concurrency. There is no config-level fix; it's an unresolved-upstream
-# podman/containers-storage defect (containers/podman discussion #20139 hit
-# the same error class with no fix). The leak cannot be stopped from this
-# project's side -- only periodically reclaimed.
+# THIS IS NOT A MAINTENANCE TOOL. IT IS NOT A PRUNER. It does not surgically
+# remove garbage -- it revokes everything (podman system reset: every image,
+# every container, podman's entire local database) and reinitializes from
+# source. There is no partial/periodic mode. Do not schedule this, do not
+# run it casually, and do not treat "storage is a bit full" as reason enough
+# on its own -- this is a last-resort recovery procedure for when disk is
+# genuinely critical, run deliberately, once, with eyes on the output.
 #
-# What NOT to use for that reclaim, learned the hard way: `podman save`,
+# A real fix -- either a periodic pruner that safely reclaims just the
+# orphaned layers, or a targeted per-Destroy() cleanup in the orchestrator
+# that stops the leak at the source -- is real, separate, deferred work.
+# Tracked in ROADMAP.md as MVP2 scope, not built here. This script exists
+# only because that work isn't done yet and disk had already hit a real
+# wall once (see below).
+#
+# Why this exists at all (full incident writeup: docs/capacity-benchmark.md,
+# "Known host constraint"): podman's rootless --userns=auto "ID-mapped copy
+# of layer" mechanism, on this podman version, does not behave as a
+# lightweight share -- every container spawn leaves behind a full,
+# untracked physical copy of whatever base layer it used, and `podman rm`
+# never reclaims it. Confirmed live: after every container was destroyed
+# and `podman ps -a` came back empty, ~19GB of orphaned overlay directories
+# remained on disk. This is a real, permanent leak from NORMAL orchestrator
+# operation -- every candidate session leaks one of these, forever,
+# regardless of TTL or concurrency. There is no config-level fix; it's an
+# unresolved-upstream podman/containers-storage defect (containers/podman
+# discussion #20139 hit the same error class with no fix).
+#
+# What NOT to use to reclaim that leak, learned the hard way: `podman save`,
 # `podman system check`, and `podman system migrate` all independently
 # triggered WORSE corruption when run against this host's storage --
 # `system check` reported nearly the entire layer store as "damaged" (mtime
@@ -29,19 +40,15 @@
 # copy mechanism merely by reading/verifying a layer. `podman system reset`
 # is the one operation validated here as safe and predictable: it wipes
 # storage AND its own bookkeeping consistently, rather than us guessing at
-# which files are safe to touch by hand.
-#
-# The real fix -- a targeted cleanup in the orchestrator's own Destroy() path
-# that removes a container's specific leaked copy instead of periodically
-# nuking everything -- is deferred, not built here. See ROADMAP.md. This
-# script is the accepted workaround until that lands (or a podman upgrade
-# fixes the underlying defect).
+# which files are safe to touch by hand -- which is exactly why this script
+# is a full nuke, not a smarter partial one: we don't yet have a version of
+# "smarter" that's actually been proven safe on this host.
 #
 # Trigger: watch hostmon's praxis_storage_free_bytes (unauthenticated,
-# :9102/metrics). Run this when it's uncomfortably low. Deliberately not
-# automatic -- storage operations on this host have already produced two
-# unpredictable surprises this session; a human stays in the loop for this
-# one.
+# :9102/metrics). This is a manual, rare, deliberate call, not a monitored
+# threshold with an automatic response -- storage operations on this host
+# have already produced two unpredictable surprises; a human stays fully in
+# the loop for this one, every time.
 set -euo pipefail
 
 SBX_USER="${SBX_USER:-praxis-sbx}"
@@ -66,7 +73,7 @@ if [[ "$(id -u)" -ne 0 ]]; then
   exit 2
 fi
 
-echo "=== praxis storage maintenance: reset and rebuild ==="
+echo "=== EMERGENCY: full storage reset and rebuild ==="
 echo
 
 # --- 1. refuse to run against a live session ----------------------------
