@@ -121,10 +121,27 @@ same-package test fixture.
 
 ## API contract and a mock for integration
 
-`openapi.yaml` documents the real, already-shipped HTTP surface --
-written as the contract other code gets built against, not retrofitted
-after the fact. If it and the code ever disagree, the code is right and
-the spec has drifted.
+`internal/dashboard/static/openapi.yaml` documents the real,
+already-shipped HTTP surface -- written as the contract other code gets
+built against, not retrofitted after the fact. If it and the code ever
+disagree, the code is right and the spec has drifted. Lives inside the
+dashboard's own embedded static tree, not at the module root, specifically
+so it can be `go:embed`'d at all (Go's embed can't reach outside the
+declaring package's own directory) and served by the running binary
+itself, not just readable from the repo:
+
+- Raw spec: `GET /ui/openapi.yaml`
+- Rendered (Redoc, vendored, no external fetch): `GET /ui/api-docs.html`
+
+Both unauthenticated -- a contract, not session data. Linked from the
+dashboard's own login page so someone evaluating whether to integrate
+doesn't need a token first.
+
+Validate it locally with `swagger-cli` or `redocly`:
+
+```bash
+npx --yes @apidevtools/swagger-cli validate internal/dashboard/static/openapi.yaml
+```
 
 For a portal or dashboard developer who wants to build against that
 contract without a live podman host:

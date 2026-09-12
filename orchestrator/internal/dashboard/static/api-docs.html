@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Praxis Orchestrator API</title>
+</head>
+<body>
+<!-- Rendered client-side by vendor/redoc.standalone.js, vendored into the
+     repo and go:embed'd rather than loaded from a CDN, same reasoning as
+     xterm.js in the terminal panel: this project's whole ethos is zero
+     external fetches at runtime.
+
+     spec-url is a plain relative path -- openapi.yaml lives right next to
+     this file in the same embedded static tree (it moved here from the
+     orchestrator module root specifically so it could be embedded at all:
+     Go's //go:embed cannot reach outside the declaring package's own
+     directory, and this file's canonical, always-current copy needs to be
+     the same one `swagger-cli validate` and any other tooling reads --
+     one file, not a synced duplicate. -->
+<redoc spec-url="openapi.yaml"></redoc>
+<script src="vendor/redoc.standalone.js"></script>
+</body>
+</html>
