@@ -458,8 +458,31 @@ components:
         name: { type: string, description: "sbx-<attempt_id>" }
         status: { type: string, enum: [running, exited, created, absent] }
         expires_at: { type: string, format: date-time }
-        runbook_digest: { type: string, example: "sha256:..." }
-        container_id: { type: string }
+        runbook_digest:
+          type: string
+          example: "sha256:c56135a710bf..."
+          description: |
+            Identifies WHICH image was used to spawn this instance --
+            the pinned digest from the Runbook that created it
+            (Runbook.Digest()). Shared across every instance of the same
+            ticket type: two different attempt_ids running the same
+            ticket report the identical runbook_digest. This is
+            deliberately the only ticket-identifying information the
+            orchestrator carries -- it maps a digest back to a
+            human-readable ticket name (e.g. "SJN-01") nowhere in this
+            API, on purpose (cmd/orchestrator/main.go's own header: "it
+            knows nothing about tickets, stars, gates, scoring or
+            candidates"). That mapping belongs to whoever DOES know
+            tickets -- the portal, or a human reading
+            tickets/<KEY>/scenario.yaml's own substrate_image field.
+        container_id:
+          type: string
+          description: |
+            Identifies THIS specific running container -- the actual
+            runtime object this one spawn produced. Unique per instance,
+            even for two instances of the identical ticket
+            (runbook_digest). Answers "which real container is this" as
+            opposed to runbook_digest's "which ticket is this."
 
     ExecResult:
       type: object
@@ -474,8 +497,18 @@ components:
       type: object
       properties:
         attempt_id: { type: string }
-        container_id: { type: string }
-        runbook: { type: string, description: "digest, from praxis.runbook-digest" }
+        container_id:
+          type: string
+          description: "This specific running container -- see Instance.container_id."
+        runbook:
+          type: string
+          description: |
+            Digest identifying which ticket image this session is
+            running (from the praxis.runbook-digest label) -- see
+            Instance.runbook_digest for what this does and doesn't mean.
+            Same field, different name here because it's read back off a
+            container label (praxis.runbook-digest) rather than echoed
+            from the original spawn request.
         state: { type: string }
         weight: { type: integer }
         spawned_at: { type: string, format: date-time }
