@@ -116,19 +116,49 @@ into `main` closes this phase.
   even-higher real concurrency, rather than continuing to re-verify by
   hand each time.
 - **Podman/containers-storage's userns/idmap ceiling (~60 concurrent
-  containers) is a real, currently-below-the-radar host constraint** —
-  full diagnosis in `docs/capacity-benchmark.md`'s "Known host constraint"
-  section. Not currently the binding number (CPT-01's disk-driven ceiling
-  of 50 is lower), but would matter if the `praxis-sbx` storage volume is
-  ever widened. Confirmed via three separate real attempts (original
-  65,536-UID subuid pool, a 16x-widened pool, and after `podman system
-  migrate`) all failing at the identical weight with the identical error;
-  this is a known, unresolved-upstream class of podman/containers-storage
-  behavior ([containers/podman #20139](https://github.com/containers/podman/discussions/20139)),
-  not something fixable from this project's own config.
-- **The same defect permanently leaks disk on every real container spawn
-  — a bigger, separate finding from 2026-09-10, not just the concurrency
-  ceiling above.** `podman rm`/the orchestrator's `Destroy()` never
+  containers) is a real, currently-below-the-radar host constraint, cause
+  still not confirmed.** Full diagnosis in `docs/capacity-benchmark.md`'s
+  "Known host constraint" section. Confirmed via three separate real
+  attempts (original 65,536-UID subuid pool, a 16x-widened pool, and after
+  `podman system migrate`) all failing at the identical weight with the
+  identical error; this is a known, unresolved-upstream class of
+  podman/containers-storage behavior
+  ([containers/podman #20139](https://github.com/containers/podman/discussions/20139)).
+  **A later finding (below) was briefly thought to explain this and does
+  not** — the widened pool from the second attempt above was confirmed
+  still live on the host as of 2026-09-15, and the below mechanism would
+  need ~1024 fresh spawns to exhaust a pool that size, not 65. Retracted in
+  `docs/capacity-benchmark.md`; treat the two as separate until someone
+  actually traces both error paths through podman/containers-storage's own
+  code.
+- **Separate, confirmed finding, 2026-09-14/15: cumulative subordinate-UID
+  slice exhaustion, ~1024 total spawns per reset (not concurrent, and not
+  the ceiling above).** Live spawn/destroy probing (2 sequential + 8
+  concurrent, against the real orchestrator) proved each fresh spawn that
+  can't dedupe its template layer permanently claims one 1024-UID slice
+  from the subuid pool (confirmed via numeric ownership: `165536`,
+  `166560`, `167584`, `168608` — each exactly 1024 apart) and the allocator
+  never reclaims a slice, whether or not the container that used it is
+  later destroyed. The live pool is confirmed 1,048,576-wide
+  (`/etc/subuid`: `165536:1048576` — the widening from the attempt above
+  survived the 2026-09-11/12 reset, since `system reset` wipes podman's own
+  storage/database, not this host-level file), so 1,048,576÷1024 = roughly
+  1024 fresh slices *per reset*, not 64. A perfectly healthy production
+  flow (spawn, respect TTL, destroy, repeat) burns this budget exactly as
+  fast as holding everything alive at once. Today's confirming probes
+  alone spent 8 of the ~1024 slices available since the last reset — real,
+  non-renewing cost, cheaper now than the original (wrong) ~64 estimate
+  suggested, but not free.
+- **The same slice-leak defect permanently leaks disk on every real
+  container spawn — a bigger, separate finding from 2026-09-10, distinct
+  from either ceiling above.** Leak size is per-ticket, not fixed: SJN-01's
+  leaked copies measured 4.0K (near-empty, shares almost everything with
+  the common base); CPT-01 (systemd, root-in-sandbox, nginx) is the likely
+  source of the ~150MB average documented below — the arithmetic (18,426MB
+  reclaimed ÷ ~88 non-SJN-01 copies ≈ 209MB each) points at CPT-01
+  specifically, though this was never split per-ticket at the time
+  (continuous staircase, no before/after per step) and remains inferred,
+  not directly measured. `podman rm`/the orchestrator's `Destroy()` never
   reclaims the private "ID-mapped copy of layer" a container creates to
   view a shared base image under its own UID range — confirmed live,
   ~19GB of orphaned directories survived with zero containers running,
@@ -144,15 +174,18 @@ into `main` closes this phase.
   and there was nothing safer validated yet. Run and validated for real
   2026-09-11/12: reclaimed 18,426MB, containment re-verified clean at the
   same bar as the original build.
-  **The actual fix — deferred to MVP2**, a real periodic pruner or a
-  targeted cleanup in `container.go`'s `Destroy()` that identifies and
-  removes a specific container's own leaked copy (via its
-  `GraphDriver.Data.LowerDir`) instead of resetting everything. Not
-  attempted in this MVP because the actual `LowerDir` pattern needed to
-  safely distinguish "this container's private leaked copy" from "the
-  real, must-never-delete base image layer" was never directly observed
-  this session — implementing filesystem deletion in the orchestrator's
-  destroy path on a guess is a worse risk than the disk leak itself. Also
+  **The actual fix — deferred to MVP2, but the pattern is now observed
+  (2026-09-14)**: of a spawn's 5 `LowerDir` entries, 4 are reliably shared
+  across every container from the same image (safe to never touch); the
+  5th (topmost, "template") layer is the one that sometimes gets privately
+  copied instead of deduped, and it's specifically that copy that leaks.
+  Distinguishing "this container's private copy" from "the real,
+  must-never-delete shared layer" is therefore a same-image sibling
+  comparison, not a guess. But deleting the directory alone is only half
+  the fix: the leaked copy also permanently holds a 1024-UID slice out of
+  a ~1024-slice-per-reset budget (see the corrected finding above), and
+  removing the directory does not by itself return that slice to podman's
+  allocator for reuse — confirmed unattempted, not confirmed safe. Also
   learned the hard way and now documented as a hard rule: **never run
   `podman save`, `system check`, or `system migrate` on this host** — all
   three independently made storage *worse* (see
@@ -191,18 +224,45 @@ into `main` closes this phase.
 3. **The portal.** Separate team's deliverable; this repo exposes the
    `X-Praxis-Token`-gated HTTP API for it to integrate against
    (`orchestrator/README.md`) but the portal itself isn't this repo's work.
-4. **MVP2: real fix for the per-spawn storage leak** (2026-09-10 finding —
-   see "In flight" above and `docs/capacity-benchmark.md`). Either a real
-   periodic pruner, or a targeted cleanup in `container.go`'s `Destroy()`
-   identifying and removing a container's own leaked "ID-mapped copy of
-   layer" via its `GraphDriver.Data.LowerDir` — either way, replacing
-   `bootstrap/90-storage-reset-rebuild.sh`'s full-nuke escape hatch with
-   something safe enough to run routinely. Needs the real `LowerDir`
-   pattern observed and confirmed safe against a throwaway container
-   first — do not write storage-deletion code in the destroy path on a
-   guess. Explicitly out of this MVP's scope; the reset-rebuild script is
-   the accepted stopgap until this lands.
-5. **Every ticket still leaves `Runbook.Weight` unset (flat weight=1),
+   **Integration is starting now, not hypothetical** — apidoc access was
+   handed over 2026-09-13. Go-forward plan, prioritized by who pays when
+   it goes wrong: `docs/portal-integration-plan.md`.
+4. **MVP2: real fix for cumulative subordinate-UID slice exhaustion**
+   (2026-09-10 disk-leak finding, confirmed live 2026-09-14/15 as a
+   ~1024-spawns-per-reset budget — a separate constraint from the
+   "concurrency ceiling," not the same mechanism; an earlier draft of this
+   entry claimed otherwise and was wrong, see "In flight" above and
+   `docs/capacity-benchmark.md`). The `LowerDir` pattern is now
+   observed: a container's private, leaked copy is its topmost of 5 layers,
+   identifiable by not matching a same-image sibling's copy of the same
+   layer. That narrows "delete the leaked directory in `Destroy()`" from a
+   guess to a known-safe comparison — but the harder half is unaddressed:
+   each leaked copy also permanently consumes one of only ~1024 1024-UID
+   slices available per `podman system reset` (pool confirmed
+   1,048,576-wide, `/etc/subuid`, 2026-09-15), and deleting the directory
+   doesn't confirm the slice becomes reusable. The real fix needs to
+   either prove slice reuse works after directory deletion, or bypass
+   podman's own `--userns=auto` allocator entirely in favor of the
+   orchestrator managing a fixed, explicitly-reusable pool of UID ranges
+   itself. Either way, replacing `bootstrap/90-storage-reset-rebuild.sh`'s
+   full-nuke escape hatch with something safe enough to run routinely.
+   Explicitly out of this MVP's scope; the reset-rebuild script is the
+   accepted stopgap until this lands, and further live probing of the
+   mechanism itself now competes with real usage for the same ~1024-slice
+   budget, so should not be done casually either. Sequenced in
+   `docs/portal-integration-plan.md`'s P2 (waits on the still-unresolved
+   original ceiling and on proving slice reuse, neither of which this
+   MVP has answered yet).
+5. **Root cause of the original ~60-64 concurrency ceiling — genuinely
+   unresolved, not just deprioritized.** `docs/capacity-benchmark.md`'s
+   "Known host constraint" section. Confirmed real via three independent
+   remediation attempts, all failing identically; confirmed *not*
+   explained by item 4's slice-exhaustion mechanism (2026-09-15 — the
+   widened pool item 4 measures against was already live during the
+   original failing test). Needs someone to trace the `65537:65537`
+   request through podman/containers-storage's own code; nothing found
+   from this project's side has resolved it.
+6. **Every ticket still leaves `Runbook.Weight` unset (flat weight=1),
    despite now having real comparative cost data.** SJN-01 and CPT-01 have
    measurably different real resource profiles (CPT-01 hits a disk ceiling
    at 50, SJN-01 doesn't until a podman internals limit at 60) — weighted

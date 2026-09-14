@@ -265,6 +265,8 @@ func (s *Server) shell(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer stream.Close()
+	s.log.Info("shell attached", "attempt_id", id, "user", user, "transport", "hijack")
+	defer s.log.Info("shell detached", "attempt_id", id, "user", user, "transport", "hijack")
 
 	hj, ok := w.(http.Hijacker)
 	if !ok {
@@ -346,6 +348,9 @@ func (s *Server) wsShell(w http.ResponseWriter, r *http.Request) {
 	// conn.Close(...) call needed.
 	wsConn := websocket.NetConn(r.Context(), conn, websocket.MessageBinary)
 	defer wsConn.Close()
+
+	s.log.Info("shell attached", "attempt_id", id, "user", user, "transport", "ws")
+	defer s.log.Info("shell detached", "attempt_id", id, "user", user, "transport", "ws")
 
 	relayBytes(wsConn, stream)
 }

@@ -138,8 +138,8 @@ async function refreshSessions() {
     tr.innerHTML =
       "<td>" + escapeHTML(s.attempt_id) + "</td>" +
       "<td>" + escapeHTML(s.state) + "</td>" +
-      "<td>" + s.weight + "</td>" +
-      "<td>" + (s.expired ? "expired" : s.remaining_seconds + "s") + "</td>";
+      "<td>" + escapeHTML(s.weight) + "</td>" +
+      "<td>" + (s.expired ? "expired" : escapeHTML(s.remaining_seconds + "s")) + "</td>";
     tr.addEventListener("click", () => openShellPanel(s.attempt_id));
     tbody.appendChild(tr);
   }

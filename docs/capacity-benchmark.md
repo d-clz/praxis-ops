@@ -20,6 +20,14 @@ up to "the limit."
 
 ## Known host constraint: podman userns/idmap ceiling (~60-64 containers)
 
+**A separate, later finding exists further down this document
+("2026-09-14/15 — a second, real, distinct leak"). It does not explain
+this section's ceiling** — that section's own opening paragraph retracts
+an earlier claim that it did, once the widened pool this section describes
+was confirmed still live on 2026-09-15. Read both; don't assume one
+resolves the other. This section's ~60-64 ceiling and its `65537:65537`
+error text remain unexplained.
+
 Discovered 2026-09-04/05, running the real SJN-01 staircase (`docs/capacity-benchmark.md`'s
 own SJN-01 entry below). This is not one of `bench/staircase.sh`'s four
 documented stop conditions (PSI, storage, OOM, neighbour) — it's a fifth,
@@ -229,6 +237,141 @@ The real fix — a targeted cleanup in the orchestrator's own `Destroy()`
 path that removes a container's specific leaked copy instead of
 periodically resetting everything — is a genuine, separate piece of work,
 deferred rather than built here; see `ROADMAP.md`.
+
+---
+
+## 2026-09-14/15 — a second, real, distinct leak: cumulative subordinate-UID slice exhaustion. It does NOT explain "Known host constraint" above — that stays unresolved
+
+**Correction, not a supersession — retracting part of what this section
+originally claimed.** A first pass at this (written 2026-09-14, since
+edited) claimed the per-spawn slice leak below was "the same mechanism" as
+the concurrency ceiling documented in "Known host constraint" above, and
+that it "fully explain[ed]" why widening the subuid pool 16x didn't move
+that ceiling. Both claims did not survive one direct check the next day
+(2026-09-15): `cat /etc/subuid /etc/subgid` on the live host shows
+`praxis-sbx:165536:1048576` — **the 16x-widened pool from the original
+benchmark week is still live; it was never reverted by the 09-11/12
+`system reset`.** That reset wipes podman's own storage/database, not this
+host-level OS file.
+
+This matters because the *original* widened-pool test — documented above,
+"Failed at weight 65 again, identical error text" — was run against this
+exact same 1,048,576-wide pool, not the original 65,536-wide one. If the
+mechanism below (a 1024-wide slice consumed per spawn, never reclaimed)
+were what caused that failure, it should have taken roughly 1024 fresh
+spawns to exhaust a pool this size, not 65. **It failed at 65 anyway, with
+16x the room the slice-leak mechanism would have needed.** That is
+sufficient to retract the unification: these are two separate findings
+that happen to land near the same-sounding number, not one mechanism with
+one explanation. "Known host constraint"'s own ~60-64 ceiling and its
+`65537:65537` error text remain exactly as unresolved as they were before
+this section was first written — still real, still not explained by
+anything found this week. Do not read the rest of this section as closing
+that question.
+
+### What is actually confirmed here, on its own terms
+
+Prompted by re-running small, controlled spawn/destroy probes against the
+live orchestrator (`leak-probe-01`/`02` sequential, then 8 concurrent
+probes) rather than a full staircase — deliberately cheaper than the
+original benchmark, since this was diagnostic, not capacity-finding:
+
+- Every spawn's `GraphDriver.Data.LowerDir` has 5 entries. 4 of them are
+  byte-identical across every probe, sequential or concurrent — real,
+  working layer sharing, exactly as overlay is supposed to behave.
+- The 5th (topmost, "template") layer is not reliably shared. Two
+  sequential spawns deduped onto the same copy; of 8 concurrent spawns, 7
+  each raced into creating their own private one instead. **The
+  discriminating variable is not yet confirmed to be concurrency itself**
+  — it may instead be whether a prior container holding that same layer is
+  still *alive* at spawn time (the two sequential spawns never destroyed
+  the first before the second ran). This also better fits the original
+  week's ~148 orphans from a *mostly-sequential* staircase, which
+  shouldn't have leaked much at all under a pure
+  concurrency-vs-sequential read. Unresolved; see the hostmon gauge
+  proposal below for a way to answer this from normal traffic instead of
+  paying for more probes.
+- **All 7 private copies survive `Destroy()`/`podman rm`, forever** — same
+  leak class as the 2026-09-10 finding above, now reproduced live and
+  narrowed to the specific layer responsible.
+- Their **numeric ownership** is real evidence of a *different* kind of
+  exhaustion than the one above: `find -printf '%U'` on three of them
+  returned `166560`, `167584`, `168608` — each exactly 1024 apart,
+  `bootstrap/30-podman-policy.sh`'s own default slice size. A fourth, from
+  the very first probe run (`9a6ecbd1...`), sits at `165536` — the pool's
+  own opening offset. **Whether this 1024-wide-slice number is the same
+  quantity as the `65537:65537` requested in the original ceiling's error
+  text is not established** — `65537` is suspiciously close to
+  `65536 + 1` and may be a relative/internal-namespace value rather than
+  an absolute host UID in the `165536`-based space measured here. Treat as
+  two separate numbers until someone actually traces both through
+  podman/containers-storage's own code, not just pattern-matches on
+  round numbers — the retraction above is exactly what happens when that
+  isn't done.
+
+**The allocator hands out slices sequentially and never reclaims one**,
+regardless of whether the container that received it is still running,
+destroyed, or was destroyed minutes ago. That is a cumulative,
+monotonically-increasing pointer into the pool as actually configured —
+1,048,576 wide, confirmed live — so 1,048,576÷1024 = **roughly 1024 fresh
+slices available per reset**, not 64. Correcting the number from the first
+pass at this section, which computed it against the pre-widening pool size
+this host no longer has.
+
+**Leak size is per-ticket, not fixed.** SJN-01's private template-layer
+copies measured **4.0K** each — near-empty, since SJN-01 shares almost
+everything with the common base image and adds only a couple of small
+scripts on top. That does not match the 2026-09-10 finding's ~150MB
+average — the arithmetic actually points somewhere more specific than
+"flagged, not yet measured": 18,426MB reclaimed, SJN-01's ~60 copies at
+4KB contributing next to nothing, leaves ~88 copies (CPT-01's ~55 plus the
+week's "dozens of verification/hardening-check spawns") averaging **~209MB
+each** — likely **CPT-01** (systemd, root-in-sandbox, nginx plus its own
+config), whose ticket-specific top layer is plausibly much larger than
+SJN-01's couple of scripts. Still inferred, not directly measured — one
+`du -sh` on a single CPT-01 leaked copy after one real spawn would confirm
+or kill it, at a cost of one slice, spent deliberately.
+
+### What this means for capacity planning (revised, corrected)
+
+Two separate, real constraints, not one:
+
+1. **"Known host constraint" above — ~60-64 *concurrent* containers,
+   cause still not confirmed.** Real, reproducible, unresolved. Nothing
+   found this week explains it; the unification claimed in this section's
+   first pass was wrong.
+2. **This section — roughly 1024 total spawns needing a fresh
+   template-layer copy, since the last full `podman system reset`, not
+   1024 concurrent containers.** A perfectly healthy production flow
+   (spawn, run, respect TTL, destroy, repeat) burns through this budget
+   exactly as fast as a pile of concurrent ones would. `PRAXIS_CAPACITY_WEIGHT=35`
+   governs concurrent admission and remains sound on its own terms, but it
+   does nothing to protect against this cumulative exhaustion — a host
+   could sit at low concurrent weight indefinitely and still run out,
+   just much later than 64 would have suggested (roughly 1024, per the
+   pool actually configured).
+
+Testing this second constraint itself has a real cost: today's probes (2
+sequential + 8 concurrent) consumed 8 of the ~1024 slices available since
+the last reset, purely to confirm the mechanism — real, non-renewing
+budget, not a free diagnostic. Cheaper now that the number is ~1024
+instead of ~64, but still worth spending deliberately, not incidentally.
+
+The real fix target for constraint 2 (see `ROADMAP.md`'s MVP2 entry,
+updated to match): reclaiming a container's own leaked copy in `Destroy()`
+only helps if the freed slice becomes available for *reuse*, which
+requires understanding how podman's allocator decides "next free slice"
+well enough to either reset it safely per-container or replace it with
+the orchestrator managing its own reusable pool of fixed UID ranges
+directly. Neither has been attempted. Constraint 1 has no fix target at
+all yet — it needs its own root cause before one can be proposed.
+
+A cheaper path to more of this than further paid probing: a hostmon gauge
+tracking the highest surviving owner UID under the overlay directory
+(`praxis_userns_slices_used`), warning well before either constraint's
+real ceiling, would surface both the sequential-vs-alive question above
+and genuine exhaustion from normal traffic — at zero additional cost.
+Proposed, not built.
 
 ---
 
