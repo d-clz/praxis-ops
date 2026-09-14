@@ -10,7 +10,10 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strings"
 	"time"
+
+	"github.com/coder/websocket"
 
 	"praxis-orchestrator/internal/metrics"
 	"praxis-orchestrator/internal/sandbox"
@@ -50,11 +53,21 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("DELETE /instances/{attemptID}", s.auth(http.HandlerFunc(s.destroy)))
 	mux.Handle("POST /instances/{attemptID}/exec", s.auth(http.HandlerFunc(s.exec)))
 	mux.Handle("POST /instances/{attemptID}/shell", s.auth(http.HandlerFunc(s.shell)))
+	// Not wrapped in s.auth: a browser's WebSocket API cannot attach a
+	// custom X-Praxis-Token header to the handshake request, so this route
+	// authenticates itself, reading the token from Sec-WebSocket-Protocol
+	// instead -- see wsShell's own comment.
+	mux.HandleFunc("GET /instances/{attemptID}/shell/ws", s.wsShell)
 	mux.Handle("POST /reap", s.auth(http.HandlerFunc(s.reap)))
 	// Same auth as everything but /healthz -- /sessions carries attempt_id,
 	// which deserves the same protection as GET /instances/{id}.
 	mux.Handle("GET /metrics", s.auth(metrics.Handler(s.reg)))
 	mux.Handle("GET /sessions", s.auth(metrics.SessionsHandler(s.reg)))
+	// The operator dashboard's own convenience endpoint (docs/dashboard-
+	// spec.md) -- same auth, same underlying snapshot as /sessions and
+	// /metrics, just restated as two numbers instead of a full session
+	// list or Prometheus text.
+	mux.Handle("GET /dashboard/summary", s.auth(metrics.DashboardSummaryHandler(s.reg)))
 	return mux
 }
 
@@ -252,6 +265,8 @@ func (s *Server) shell(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer stream.Close()
+	s.log.Info("shell attached", "attempt_id", id, "user", user, "transport", "hijack")
+	defer s.log.Info("shell detached", "attempt_id", id, "user", user, "transport", "hijack")
 
 	hj, ok := w.(http.Hijacker)
 	if !ok {
@@ -271,6 +286,86 @@ func (s *Server) shell(w http.ResponseWriter, r *http.Request) {
 	_ = buf.Flush()
 
 	relayBytes(&hijackedPortal{rw: buf, conn: conn}, stream)
+}
+
+// wsShell is /shell's browser-compatible sibling: a real RFC 6455
+// WebSocket handshake over the identical backend.ExecShell PTY, for a
+// client that can't speak the raw hijack -- a browser's native WebSocket
+// API strictly requires real WS framing (docs/session-03-plan.md, "The one
+// fact that changes the design"). Deliberately additive, not a replacement:
+// /shell keeps working unchanged for curl/pxoctl/any future server-to-
+// server caller.
+//
+// Auth is the one real difference from every other route. A browser's
+// WebSocket constructor cannot attach a custom header to the handshake
+// request at all -- there is no way to send X-Praxis-Token here the way
+// every fetch() call in the dashboard does. The standard mitigation is
+// used instead: the token travels as the Sec-WebSocket-Protocol value,
+// which (unlike a URL query parameter) never lands in server access logs,
+// browser history, or a Referer header. Checked here with the same
+// constant-time comparison auth() uses -- coder/websocket's own
+// subprotocol matching (AcceptOptions.Subprotocols) is case-insensitive
+// string equality, fine for protocol *negotiation* but not the primitive
+// this project uses for comparing a secret. The token is validated by hand
+// first; AcceptOptions.Subprotocols is only ever given the exact value
+// already proven correct, purely so the library echoes it back and the
+// browser's handshake succeeds (an offered-but-unechoed subprotocol fails
+// the connection per the WebSocket spec).
+func (s *Server) wsShell(w http.ResponseWriter, r *http.Request) {
+	token := firstSubprotocol(r.Header.Get("Sec-WebSocket-Protocol"))
+	if s.cfg.Token == "" || subtle.ConstantTimeCompare([]byte(token), []byte(s.cfg.Token)) != 1 {
+		writeErr(w, http.StatusUnauthorized, "bad token")
+		return
+	}
+
+	id := r.PathValue("attemptID")
+	inst, err := s.backend.Get(r.Context(), id)
+	if err != nil || inst.Status != sandbox.StatusRunning {
+		writeErr(w, http.StatusConflict, "instance not running")
+		return
+	}
+
+	user := r.URL.Query().Get("user")
+	if user == "" {
+		user = "candidate"
+	}
+
+	stream, err := s.backend.ExecShell(r.Context(), id, user)
+	if err != nil {
+		s.log.Error("ws shell exec failed", "attempt_id", id, "user", user, "err", err)
+		writeErr(w, http.StatusInternalServerError, "exec failed")
+		return
+	}
+	defer stream.Close()
+
+	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{Subprotocols: []string{token}})
+	if err != nil {
+		s.log.Error("ws handshake failed", "attempt_id", id, "err", err)
+		return
+	}
+	// NetConn's own doc: "Close will close the *websocket.Conn with
+	// StatusNormalClosure" -- closing this is sufficient, no separate
+	// conn.Close(...) call needed.
+	wsConn := websocket.NetConn(r.Context(), conn, websocket.MessageBinary)
+	defer wsConn.Close()
+
+	s.log.Info("shell attached", "attempt_id", id, "user", user, "transport", "ws")
+	defer s.log.Info("shell detached", "attempt_id", id, "user", user, "transport", "ws")
+
+	relayBytes(wsConn, stream)
+}
+
+// firstSubprotocol reads the first (only, in practice -- the dashboard
+// sends exactly one) value from a Sec-WebSocket-Protocol header, which is
+// a comma-separated list per RFC 6455 -- a raw Header.Get would return the
+// whole list as one string, silently comparing the token against
+// "<token>, something-else" instead of "<token>" alone the moment a
+// browser or proxy ever offers more than one.
+func firstSubprotocol(header string) string {
+	if i := strings.IndexByte(header, ','); i >= 0 {
+		header = header[:i]
+	}
+	return strings.TrimSpace(header)
 }
 
 // hijackedPortal reads through the hijacked connection's own buffered

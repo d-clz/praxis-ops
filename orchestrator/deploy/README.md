@@ -81,6 +81,42 @@ both install steps are idempotent, so nothing extra happens on a run where
 neither did. `make deploy` refuses to run unprivileged rather than silently
 installing nothing or restarting the wrong unit.
 
+## Reaching the operator dashboard
+
+No separate service, no separate unit. The dashboard (`internal/dashboard`,
+`docs/dashboard-spec.md`) is served by the *same* `praxis-orchestrator`
+process, on the *same* port, as part of the *same* `http.Server` --
+`sudo make deploy` above is the entire deploy step, already done. There is
+nothing here to enable, restart, or check separately from `pxoctl unit`/
+`pxoctl api health`.
+
+The real question is reachability, not deployment: `PRAXIS_LISTEN` binds
+`127.0.0.1` only, deliberately, and there is no separate inbound firewall
+rule for this port either (`40-network-guard.sh` filters *outbound* egress
+by uid; nothing here governs inbound access) -- the bind address is
+currently the only thing standing between this port and the network.
+
+**Reach it via an SSH tunnel, not by rebinding.** From an admin's own
+machine:
+
+```bash
+ssh -L 8081:127.0.0.1:8081 praxis@<host>
+```
+
+Then browse `http://127.0.0.1:8081/ui/` locally. Nothing on the host
+changes -- the service stays exactly as loopback-hardened as every other
+route it already serves, riding the same SSH access an admin already needs
+to manage the box at all.
+
+Rebinding `PRAXIS_LISTEN` to a real interface (`0.0.0.0:8081` or a specific
+private IP) is a genuine security posture change, not a config tweak --
+given there is no inbound firewall today, that alone would expose the
+*entire* API (every route, not just `/ui/`) to anything on the host's
+network, protected by nothing but the shared token. Not done here, and not
+recommended without also adding a real, scoped inbound nftables rule
+alongside it -- consistent with this project's "sealed by default" posture
+everywhere else (`bootstrap/40-network-guard.sh`, `30-podman-policy.sh`).
+
 ## Deploying hostmon (as `praxis`, with `sudo`)
 
 hostmon is the independent second view (`docs/observability.md`) -- its own

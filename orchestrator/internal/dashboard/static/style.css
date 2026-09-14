@@ -1,0 +1,94 @@
+/* Praxis operator dashboard. Plain CSS, no framework -- an operator tool,
+   not a product surface; legibility over polish. */
+
+:root {
+  color-scheme: light dark;
+  --bg: #111417;
+  --panel: #1b1f24;
+  --border: #2c3238;
+  --text: #e6e6e6;
+  --muted: #8a929c;
+  --accent: #4da3ff;
+  --error: #ff6b6b;
+  --warn: #e0a939;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.4 -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+h1 { font-size: 1.1rem; margin: 0; }
+h2 { font-size: 0.95rem; margin: 0 0 0.5rem; color: var(--muted); }
+
+code {
+  background: var(--panel);
+  padding: 0.1rem 0.3rem;
+  border-radius: 3px;
+}
+
+#login {
+  max-width: 420px;
+  margin: 15vh auto;
+  padding: 2rem;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+#login-form { display: flex; gap: 0.5rem; margin-top: 1rem; }
+#token-input { flex: 1; padding: 0.5rem; background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 4px; }
+button {
+  padding: 0.5rem 1rem;
+  background: var(--accent);
+  color: #06121f;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-weight: 600;
+}
+button:hover { filter: brightness(1.1); }
+.error { color: var(--error); margin-top: 0.75rem; }
+
+#dashboard header {
+  display: flex;
+  align-items: center;
+  gap: 1.5rem;
+  padding: 0.75rem 1.5rem;
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+#dashboard header > *:last-child { margin-left: auto; }
+#staleness { color: var(--muted); font-size: 0.85rem; }
+#capacity { font-variant-numeric: tabular-nums; }
+
+#body { display: flex; height: calc(100vh - 60px); }
+#sessions-panel { width: 420px; padding: 1rem 1.5rem; overflow-y: auto; border-right: 1px solid var(--border); }
+#shell-panel { flex: 1; display: flex; flex-direction: column; padding: 1rem; min-width: 0; }
+#shell-panel[hidden], #sessions-panel[hidden] { display: none; }
+
+table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+th, td { text-align: left; padding: 0.4rem 0.3rem; border-bottom: 1px solid var(--border); }
+th { color: var(--muted); font-weight: 500; }
+.session-row { cursor: pointer; }
+.session-row:hover { background: var(--panel); }
+.session-row.selected { background: rgba(77, 163, 255, 0.15); }
+
+#orphans-note { color: var(--warn); font-size: 0.8rem; }
+
+#shell-header { display: flex; align-items: center; gap: 1rem; margin-bottom: 0.5rem; }
+#shell-title { font-weight: 600; }
+#shell-user { background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 4px; padding: 0.25rem; }
+#shell-disconnected {
+  background: var(--error);
+  color: #200;
+  padding: 0.4rem 0.75rem;
+  border-radius: 4px;
+  margin-bottom: 0.5rem;
+  font-weight: 600;
+}
+
+#terminal { flex: 1; min-height: 0; }

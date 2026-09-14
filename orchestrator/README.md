@@ -92,9 +92,15 @@ cmd/orchestrator/     main() -- wiring only, not unit tested on purpose
 cmd/hostmon/           the independent second view: reads the podman socket
                         directly, never calls the orchestrator, never imports
                         internal/sandbox
+cmd/mockorchestrator/  the real API surface against an in-memory backend --
+                        no podman/host/root requirement, for a portal or
+                        dashboard developer to build against
 internal/sandbox/      Runbook, the Backend interface, the podman-backed
                         implementation (Create/Destroy/Reap/ExecScript/
                         ExecShell)
+internal/mockbackend/  in-memory sandbox.Backend + metrics.Lister for
+                        cmd/mockorchestrator -- not a test fixture, a real
+                        runnable stand-in
 internal/api/          HTTP surface: auth, routing, the exec/shell handlers
 internal/metrics/      shared by both binaries -- label parsing, the
                         Prometheus-format registry, orphan classification
@@ -109,3 +115,50 @@ shell-relay code (`ExecShell`, the `/shell` hijack handler) testable at all
 before a real container was ever involved -- a real `net.Pipe()` standing in
 for the container's PTY, a real TCP connection into `httptest.NewServer`
 standing in for the portal, and the actual hijack/relay code in between.
+`internal/mockbackend` leans on the exact same seam for a different purpose
+-- a real, runnable binary another team can point a client at, not a
+same-package test fixture.
+
+## API contract and a mock for integration
+
+`internal/dashboard/static/openapi.yaml` documents the real,
+already-shipped HTTP surface -- written as the contract other code gets
+built against, not retrofitted after the fact. If it and the code ever
+disagree, the code is right and the spec has drifted. Lives inside the
+dashboard's own embedded static tree, not at the module root, specifically
+so it can be `go:embed`'d at all (Go's embed can't reach outside the
+declaring package's own directory) and served by the running binary
+itself, not just readable from the repo:
+
+- Raw spec: `GET /ui/openapi.yaml`
+- Rendered (Redoc, vendored, no external fetch): `GET /ui/api-docs.html`
+
+Both unauthenticated -- a contract, not session data. Linked from the
+dashboard's own login page so someone evaluating whether to integrate
+doesn't need a token first.
+
+Validate it locally with `swagger-cli` or `redocly`:
+
+```bash
+npx --yes @apidevtools/swagger-cli validate internal/dashboard/static/openapi.yaml
+```
+
+For a portal or dashboard developer who wants to build against that
+contract without a live podman host:
+
+```bash
+go run ./cmd/mockorchestrator
+# or: make build-mock && ./mockorchestrator
+```
+
+Defaults to `PRAXIS_ORCH_TOKEN=mock-token`, `127.0.0.1:8081`, and a
+generous `PRAXIS_CAPACITY_WEIGHT=1000` so it's usable immediately --
+override any of them the same way `cmd/orchestrator` reads its own env
+vars. It serves the *identical* `api.New()`/`Routes()` production runs,
+against `internal/mockbackend` instead of a real container runtime: real
+create/get/destroy/exec, a real interactive shell (a raw line-echo PTY
+stand-in, not a full terminal emulation) reachable through both `/shell`
+and the real WebSocket `/shell/ws`, and real capacity/session accounting
+(`/metrics`, `/sessions`) derived through the same `metrics.CollectManaged`
+code path production uses, fed synthetic-but-correctly-labeled container
+listings instead of a real docker socket's response.

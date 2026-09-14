@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/coder/websocket"
 	"github.com/docker/docker/api/types"
 
 	"praxis-orchestrator/internal/metrics"
@@ -351,5 +352,98 @@ func TestShell_RelaysBytesBothWays(t *testing.T) {
 	}
 	if string(got2) != toPortal {
 		t.Errorf("portal side received %q, want %q", got2, toPortal)
+	}
+}
+
+// TestWsShell_RelaysBytesBothWays is wsShell's own version of
+// TestShell_RelaysBytesBothWays above -- same fake PTY (net.Pipe()), but a
+// real WebSocket client dial instead of a hand-rolled HTTP/1.1 request,
+// since this is exactly the kind of framing this endpoint exists so a real
+// client (a browser, here a real coder/websocket dialer) doesn't have to
+// hand-roll.
+func TestWsShell_RelaysBytesBothWays(t *testing.T) {
+	be := newFakeBackend()
+	be.instances["attempt-1"] = sandbox.Instance{AttemptID: "attempt-1", Status: sandbox.StatusRunning}
+	sandboxSide, testSide := net.Pipe()
+	be.shellConn = sandboxSide
+
+	ts := httptest.NewServer(New(be, fakeLister{}, testRegistry(), Config{Token: "secret", CapacityWeight: 10}, testLogger()).Routes())
+	defer ts.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/instances/attempt-1/shell/ws"
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{Subprotocols: []string{"secret"}})
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.CloseNow()
+	wsConn := websocket.NetConn(context.Background(), conn, websocket.MessageBinary)
+	defer wsConn.Close()
+
+	const toSandbox = "hello sandbox"
+	if _, err := wsConn.Write([]byte(toSandbox)); err != nil {
+		t.Fatalf("write toward sandbox: %v", err)
+	}
+	got := make([]byte, len(toSandbox))
+	if _, err := io.ReadFull(testSide, got); err != nil {
+		t.Fatalf("read on sandbox side: %v", err)
+	}
+	if string(got) != toSandbox {
+		t.Errorf("sandbox side received %q, want %q", got, toSandbox)
+	}
+
+	const toPortal = "hello portal"
+	if _, err := testSide.Write([]byte(toPortal)); err != nil {
+		t.Fatalf("write toward portal: %v", err)
+	}
+	got2 := make([]byte, len(toPortal))
+	if _, err := io.ReadFull(wsConn, got2); err != nil {
+		t.Fatalf("read on portal (browser) side: %v", err)
+	}
+	if string(got2) != toPortal {
+		t.Errorf("portal side received %q, want %q", got2, toPortal)
+	}
+}
+
+// TestWsShell_RejectsMissingOrWrongToken confirms the one auth path this
+// endpoint can't share with every other route (s.auth's X-Praxis-Token
+// header check) -- a browser's WebSocket API can't send that header at
+// all, so the token travels as Sec-WebSocket-Protocol instead
+// (DialOptions.Subprotocols on the client side), and rejection has to be
+// verified on this endpoint specifically rather than trusted from auth()'s
+// own test coverage.
+func TestWsShell_RejectsMissingOrWrongToken(t *testing.T) {
+	be := newFakeBackend()
+	be.instances["attempt-1"] = sandbox.Instance{AttemptID: "attempt-1", Status: sandbox.StatusRunning}
+	sandboxSide, _ := net.Pipe()
+	be.shellConn = sandboxSide
+
+	ts := httptest.NewServer(New(be, fakeLister{}, testRegistry(), Config{Token: "secret", CapacityWeight: 10}, testLogger()).Routes())
+	defer ts.Close()
+	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/instances/attempt-1/shell/ws"
+
+	cases := []struct {
+		name         string
+		subprotocols []string
+	}{
+		{"missing", nil},
+		{"wrong", []string{"not-the-secret"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			_, resp, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{Subprotocols: c.subprotocols})
+			if err == nil {
+				t.Fatal("dial succeeded, want the handshake to be rejected")
+			}
+			if resp == nil {
+				t.Fatal("no response returned alongside the dial error")
+			}
+			if resp.StatusCode != http.StatusUnauthorized {
+				t.Errorf("status = %d, want 401", resp.StatusCode)
+			}
+		})
 	}
 }
